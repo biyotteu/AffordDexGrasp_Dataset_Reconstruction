@@ -208,23 +208,20 @@ def _clone_paint3d_if_needed(clone_dir, paint3d_cfg):
 
 def _check_paint3d_deps_in_env(conda_exe, env_name):
     """Paint3D conda 환경 내 핵심 의존성 확인"""
+    # python -c 에서는 세미콜론으로 한줄로 작성해야 함 (try/except도 한줄로)
     check_script = (
         "import sys; "
         "print(f'python={sys.version.split()[0]}'); "
         "import torch; print(f'torch={torch.__version__}'); "
         "print(f'cuda={torch.version.cuda}'); "
         "print(f'gpu_available={torch.cuda.is_available()}'); "
-        "try:\n"
-        "    import kaolin; print(f'kaolin={kaolin.__version__}')\n"
-        "except: print('kaolin=NOT_FOUND'); "
-        "try:\n"
-        "    import diffusers; print(f'diffusers={diffusers.__version__}')\n"
-        "except: print('diffusers=NOT_FOUND')"
+        "exec(\"try:\\n import kaolin\\n print(f'kaolin={kaolin.__version__}')\\nexcept:\\n print('kaolin=NOT_FOUND')\"); "
+        "exec(\"try:\\n import diffusers\\n print(f'diffusers={diffusers.__version__}')\\nexcept:\\n print('diffusers=NOT_FOUND')\")"
     )
     try:
         result = subprocess.run(
             [conda_exe, "run", "-n", env_name, "python", "-c", check_script],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=60,
         )
         if result.returncode == 0:
             for line in result.stdout.strip().split('\n'):
@@ -233,9 +230,15 @@ def _check_paint3d_deps_in_env(conda_exe, env_name):
                     status = "✅" if val != "NOT_FOUND" else "❌"
                     print(f"    {status} {key}: {val}")
         else:
-            print(f"    ⚠️ 의존성 체크 실패")
-    except Exception:
-        pass
+            print(f"    ⚠️ 의존성 체크 실패:")
+            if result.stderr:
+                for line in result.stderr.strip().split('\n')[-5:]:
+                    print(f"      {line}")
+            if result.stdout:
+                for line in result.stdout.strip().split('\n')[-3:]:
+                    print(f"      {line}")
+    except Exception as e:
+        print(f"    ⚠️ 의존성 체크 예외: {e}")
 
 
 # ============================================================
@@ -498,16 +501,35 @@ def run_paint3d(cfg, max_objects=None, paint3d_python=None, paint3d_dir=None):
                     cmd, capture_output=True, text=True, timeout=timeout,
                 )
                 if result.returncode == 0:
-                    stats["success"] += 1
+                    # 실제 Paint3D 결과가 있는지 확인 (fallback이 아닌 진짜 텍스처)
+                    if list(obj_tex_dir.glob("material_*.png")):
+                        stats["success"] += 1
+                    elif (obj_tex_dir / "albedo.png").exists():
+                        stats["success"] += 1
+                    else:
+                        stats["fallback"] += 1
                 else:
                     # Worker 내부에서 이미 fallback 처리함
                     if (obj_tex_dir / "albedo.png").exists():
                         stats["fallback"] += 1
                     else:
                         stats["failed"] += 1
-                    if result.stderr:
-                        err_lines = result.stderr.strip().split('\n')[-3:]
-                        tqdm.write(f"    ⚠️ {obj_id}: {' | '.join(err_lines)}")
+
+                    # 첫 3개 실패에 대해 상세 에러 출력 (stdout + stderr 모두 확인)
+                    if stats["fallback"] + stats["failed"] <= 3:
+                        all_output = ""
+                        if result.stderr:
+                            all_output += result.stderr
+                        if result.stdout:
+                            all_output += result.stdout
+                        if all_output:
+                            err_lines = all_output.strip().split('\n')[-10:]
+                            tqdm.write(f"    ⚠️ {obj_id} 실패 (returncode={result.returncode}):")
+                            for line in err_lines:
+                                tqdm.write(f"      {line}")
+                        else:
+                            tqdm.write(f"    ⚠️ {obj_id} 실패 (returncode={result.returncode}, 출력 없음)")
+
             except subprocess.TimeoutExpired:
                 tqdm.write(f"    ⚠️ {obj_id} 타임아웃 ({timeout}s)")
                 _run_fallback_texture(str(uv_mesh), str(obj_tex_dir))

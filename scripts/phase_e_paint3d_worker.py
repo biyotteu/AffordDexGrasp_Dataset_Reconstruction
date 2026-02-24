@@ -51,42 +51,54 @@ def run_paint3d_cli(mesh_path, output_dir, prompt, paint3d_dir,
     """
     paint3d_path = Path(paint3d_dir).resolve()
     if not paint3d_path.exists():
-        print(f"ERROR: Paint3D directory not found: {paint3d_dir}")
+        print(f"ERROR: Paint3D directory not found: {paint3d_dir}", file=sys.stderr)
         return False
 
     os.makedirs(output_dir, exist_ok=True)
     stage1_outdir = os.path.join(output_dir, "stage1")
     stage2_outdir = output_dir
 
+    # --- 의존성 사전 체크 ---
+    dep_check_failed = False
+    for mod_name in ["torch", "kaolin", "diffusers"]:
+        try:
+            __import__(mod_name)
+        except ImportError:
+            print(f"ERROR: '{mod_name}' not installed in current Python ({sys.executable})", file=sys.stderr)
+            dep_check_failed = True
+    if dep_check_failed:
+        print(f"ERROR: Paint3D 의존성 부족. conda 환경 확인 필요:", file=sys.stderr)
+        print(f"  conda activate paint3d && pip install torch kaolin diffusers", file=sys.stderr)
+        return False
+
     # Config 파일 경로 확인
     stage1_sd_config = paint3d_path / sd_config_stage1
     stage2_sd_config = paint3d_path / sd_config_stage2
-    render_cfg = paint3d_path / render_config if render_config else None
+    render_cfg = paint3d_path / render_config if render_config and render_config.strip() else None
 
     if not stage1_sd_config.exists():
-        print(f"ERROR: Stage 1 sd_config not found: {stage1_sd_config}")
-        print(f"  Paint3D를 올바르게 클론했는지 확인하세요:")
-        print(f"  git clone https://github.com/OpenTexture/Paint3D.git {paint3d_dir}")
+        print(f"ERROR: Stage 1 sd_config not found: {stage1_sd_config}", file=sys.stderr)
+        print(f"  Paint3D를 올바르게 클론했는지 확인하세요:", file=sys.stderr)
+        print(f"  git clone https://github.com/OpenTexture/Paint3D.git {paint3d_dir}", file=sys.stderr)
         return False
 
     # --- Stage 1: Coarse texture ---
     stage1_script = paint3d_path / "pipeline_paint3d_stage1.py"
     if not stage1_script.exists():
-        print(f"ERROR: Stage 1 script not found: {stage1_script}")
+        print(f"ERROR: Stage 1 script not found: {stage1_script}", file=sys.stderr)
         return False
 
     stage1_cmd = [
         sys.executable,
         str(stage1_script),
         "--sd_config", str(stage1_sd_config),
-        "--render_config", str(render_cfg) if render_cfg and render_cfg.exists() else "",
         "--mesh_path", str(Path(mesh_path).resolve()),
         "--prompt", prompt,
         "--outdir", str(Path(stage1_outdir).resolve()),
     ]
-    # render_config 없으면 인자 제거
-    if not render_cfg or not render_cfg.exists():
-        stage1_cmd = [a for a in stage1_cmd if a]  # 빈 문자열 제거
+    # render_config가 있으면 추가
+    if render_cfg and render_cfg.exists():
+        stage1_cmd.extend(["--render_config", str(render_cfg)])
 
     print(f"[Stage 1] Coarse texture generation...")
     print(f"  sd_config: {stage1_sd_config.name}")
@@ -98,11 +110,15 @@ def run_paint3d_cli(mesh_path, output_dir, prompt, paint3d_dir,
     )
 
     if result1.returncode != 0:
-        print(f"[Stage 1] FAILED (returncode={result1.returncode})")
+        print(f"[Stage 1] FAILED (returncode={result1.returncode})", file=sys.stderr)
         if result1.stderr:
             err_lines = result1.stderr.strip().split('\n')[-10:]
             for line in err_lines:
-                print(f"  stderr: {line}")
+                print(f"  stderr: {line}", file=sys.stderr)
+        if result1.stdout:
+            out_lines = result1.stdout.strip().split('\n')[-5:]
+            for line in out_lines:
+                print(f"  stdout: {line}", file=sys.stderr)
         return False
 
     # Stage 1 결과 확인
@@ -144,14 +160,13 @@ def run_paint3d_cli(mesh_path, output_dir, prompt, paint3d_dir,
         sys.executable,
         str(stage2_script),
         "--sd_config", str(stage2_sd_config),
-        "--render_config", str(render_cfg) if render_cfg and render_cfg.exists() else "",
         "--mesh_path", str(Path(mesh_path).resolve()),
         "--texture_path", texture_path,
         "--prompt", prompt,
         "--outdir", str(Path(stage2_outdir).resolve()),
     ]
-    if not render_cfg or not render_cfg.exists():
-        stage2_cmd = [a for a in stage2_cmd if a]
+    if render_cfg and render_cfg.exists():
+        stage2_cmd.extend(["--render_config", str(render_cfg)])
 
     print(f"[Stage 2] Texture refinement...")
     print(f"  sd_config: {stage2_sd_config.name}")
@@ -163,12 +178,16 @@ def run_paint3d_cli(mesh_path, output_dir, prompt, paint3d_dir,
     )
 
     if result2.returncode != 0:
-        print(f"[Stage 2] FAILED (returncode={result2.returncode})")
+        print(f"[Stage 2] FAILED (returncode={result2.returncode})", file=sys.stderr)
         if result2.stderr:
             err_lines = result2.stderr.strip().split('\n')[-10:]
             for line in err_lines:
-                print(f"  stderr: {line}")
-        print("[Stage 2] Falling back to Stage 1 output")
+                print(f"  stderr: {line}", file=sys.stderr)
+        if result2.stdout:
+            out_lines = result2.stdout.strip().split('\n')[-5:]
+            for line in out_lines:
+                print(f"  stdout: {line}", file=sys.stderr)
+        print("[Stage 2] Falling back to Stage 1 output", file=sys.stderr)
         _copy_results_to_output(stage1_outdir, output_dir, mesh_path)
         return True
 
