@@ -26,7 +26,37 @@ Always respond in the specified JSON format.
 
 ### 1-2. 단건 추출 프롬프트 (EXTRACTION_PROMPT_TEMPLATE)
 
-CoT 4단계 구조로 설계:
+```
+Look at the following image(s) of an object placed on a table.
+A human has given the following instruction for how to grasp this object:
+
+**Instruction:** "{guidance}"
+
+Please analyze the instruction and the object in the image step by step:
+
+**Step 1 - Object Recognition:** What is the object? Identify its category.
+**Step 2 - Intention Understanding:** What does the user want to do with the object? (e.g., "use it", "hand it over", "pick it up", "pour from it", "open it")
+**Step 3 - Contact Part Identification:** Which specific part of the object should the hand contact? (e.g., "handle", "body", "lid", "rim", "base", "neck", "trigger", "blade")
+**Step 4 - Grasp Direction:** From which direction should the hand approach? (e.g., "from the right", "from the left", "from above", "from the front", "from behind", "from the side")
+
+Now provide your analysis in the following JSON format:
+{
+    "reasoning": "<your step-by-step reasoning>",
+    "object_category": "<object category name>",
+    "intention": "<what the user wants to do>",
+    "contact_parts": "<specific part(s) to contact>",
+    "grasp_direction": "<approach direction>",
+    "normalized_command": "<a standardized version of the instruction>"
+}
+
+Important guidelines:
+- Be specific about contact parts (not just "the object" but which part)
+- Use consistent terminology for directions (left/right/above/front/behind/side)
+- If the instruction is ambiguous, make a reasonable inference based on the object type
+- The normalized_command should be a clean, standardized version of the original instruction
+```
+
+CoT 4단계 구조:
 
 | 단계 | 내용 | 추출 속성 |
 |------|------|-----------|
@@ -35,13 +65,37 @@ CoT 4단계 구조로 설계:
 | Step 3 | Contact Part Identification | `contact_parts` |
 | Step 4 | Grasp Direction | `grasp_direction` |
 
-출력 필드: `reasoning`, `object_category`, `intention`, `contact_parts`, `grasp_direction`, `normalized_command`
-
-**설계 의도**: 논문의 4가지 semantic attribute와 1:1 매핑. reasoning 필드로 CoT 유도. normalized_command로 guidance 텍스트 표준화.
+**설계 의도**: 논문의 4가지 semantic attribute와 1:1 매핑. reasoning 필드로 CoT 유도. normalized_command로 guidance 텍스트 표준화. 각 Step에 예시 후보를 열거하여 MLLM 출력 일관성 확보.
 
 ### 1-3. 배치 추출 프롬프트 (BATCH_EXTRACTION_PROMPT)
 
-같은 scene(같은 물체)의 여러 guidance를 한 번의 MLLM 호출로 처리. JSON array 형태로 응답 요청.
+```
+Look at the image of an object. Multiple human instructions are given for grasping it.
+For EACH instruction, reason step by step:
+1. Object Recognition: What is this object?
+2. Intention Understanding: What does the user want to do? (use, pick up, hand over, pour, open, etc.)
+3. Contact Part Identification: Which specific part should the hand contact? (handle, body, lid, rim, base, neck, blade, trigger, etc.)
+4. Grasp Direction: From which direction to approach? (from the left / right / above / front / behind / side)
+
+{instruction_list}
+
+Respond with a JSON array of exactly {num_instructions} entries, one per instruction, in order:
+[
+    {
+        "reasoning": "<your step-by-step reasoning>",
+        "object_category": "<object category>",
+        "intention": "<what the user wants to do>",
+        "contact_parts": "<specific part(s) to contact>",
+        "grasp_direction": "<approach direction>",
+        "normalized_command": "<standardized version of instruction>"
+    },
+    ...
+]
+Be specific about contact parts (not just "the object"). Use consistent direction terms (left/right/above/front/behind/side).
+If an instruction is ambiguous, make a reasonable inference based on the object type.
+```
+
+같은 scene(같은 물체)의 여러 guidance를 한 번의 MLLM 호출로 처리. `{instruction_list}`에 번호가 매겨진 guidance 텍스트가 들어가고, `{num_instructions}`에 개수가 들어감.
 
 **설계 의도**: 같은 물체에 대한 object_category를 일관되게 추출 + GPU inference 횟수 감소.
 
