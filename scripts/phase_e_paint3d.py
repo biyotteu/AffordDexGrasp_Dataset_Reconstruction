@@ -245,6 +245,7 @@ def _check_paint3d_deps_in_env(conda_exe, env_name):
 
 # Paint3D가 필요로 하는 pip 패키지 (environment.yaml 기반)
 PAINT3D_PIP_DEPS = [
+    "huggingface_hub<0.24.0",   # diffusers 0.25.0과 호환 (cached_download 필요)
     "diffusers==0.25.0",
     "accelerate==0.29.2",
     "transformers==4.27.1",
