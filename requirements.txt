@@ -1,0 +1,53 @@
+# ============================================================
+# AffordDexGrasp Dataset Reconstruction - Requirements
+# ============================================================
+# NOTE: Install PyTorch Nightly FIRST for Blackwell (RTX PRO 6000):
+#   pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu128
+# ============================================================
+
+# Core
+numpy>=1.24.0
+scipy>=1.10.0
+pyyaml>=6.0
+tqdm>=4.65.0
+jsonlines>=3.1.0
+pandas>=2.0.0
+
+# 3D Processing
+open3d>=0.17.0
+trimesh>=3.23.0
+pyglet<2  # for trimesh visualization
+pytorch_kinematics>=0.7.0
+mujoco>=3.0.0
+
+# Rendering (BlenderProc - install separately)
+# pip install blenderproc
+
+# Point Cloud / Neural Nets
+# torch (installed separately - nightly cu128)
+# torchvision (installed separately)
+
+# MLLM (Qwen2.5-VL)
+transformers>=4.45.0
+accelerate>=0.30.0
+vllm>=0.6.0  # for efficient serving
+qwen-vl-utils>=0.0.8
+Pillow>=10.0.0
+
+# Paint3D dependencies
+diffusers>=0.25.0
+safetensors>=0.4.0
+xformers  # optional, for memory efficiency
+
+# Visualization & QC
+matplotlib>=3.7.0
+plotly>=5.15.0
+opencv-python>=4.8.0
+
+# HuggingFace
+huggingface_hub>=0.20.0
+
+# Utilities
+rich>=13.0.0
+
+tqdm

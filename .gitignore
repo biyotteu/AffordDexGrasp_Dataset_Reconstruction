@@ -1,0 +1,13 @@
+data
+data_proc
+_temp_gys_clone
+splits
+textures
+thirdparty
+scenes
+final_dataset
+logs
+pointclouds
+renders
+semantics
+*/__pycache__

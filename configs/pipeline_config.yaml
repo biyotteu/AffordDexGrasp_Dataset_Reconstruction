@@ -1,0 +1,129 @@
+# ============================================================
+# AffordDexGrasp Dataset Reconstruction - Pipeline Configuration
+# ============================================================
+
+# --- Paths ---
+paths:
+  project_root: "./AffordDexGraspData"
+  raw_data: "./data"
+  dexgys: "./data/dexgys"
+  oakink: "./data/oakink"
+  mjcf: "./data/mjcf"
+  processed: "./data_proc"
+  scenes: "./scenes"
+  textures: "./textures"
+  renders: "./renders"
+  pointclouds: "./pointclouds"
+  semantics: "./semantics"
+  splits: "./splits"
+  final_dataset: "./final_dataset"
+
+# --- DexGYS Dataset ---
+dexgys:
+  hf_repo: "wyl2077/DexGYS"
+  train_file: "train_with_guide_v2.1.json"
+  test_file: "test_with_guide_v2.1.json"
+  grasp_dim: 28  # t(3) + axis_angle(3) + qpos(22)
+
+# --- OakInk ---
+oakink:
+  hf_repo: "oakink/OakInk-v1"
+  shape_files:
+    - "metaV2.zip"
+    - "OakInkObjectsV2.zip"
+    - "OakInkVirtualObjectsV2.zip"
+    - "oakink_shape_v2.zip"
+
+# --- ShadowHand ---
+shadow_hand:
+  mjcf_url: "https://mirrors.pku.edu.cn/dl-release/UniDexGrasp_CVPR2023/"
+  dof: 22
+  total_grasp_params: 28  # t(3) + r(3) + q(22)
+  # DexGraspNet 원본 hand model (Phase H에서 사용)
+  # shadow_hand_wrist_free.xml: root=palm, 22 DOF, DexGYS grasp와 정확히 일치
+  dexgraspnet_mjcf: "./data/mjcf_dexgraspnet"
+  dexgraspnet_xml: "shadow_hand_wrist_free.xml"
+
+# --- Scene Construction ---
+scene:
+  num_cameras: 5
+  camera_layout:
+    lateral_count: 4
+    topdown_count: 1
+    lateral_elevation_deg: 30  # degrees from horizontal
+    lateral_azimuth_spacing_deg: 90  # equally spaced
+    distance_from_center: 0.8  # meters
+    topdown_height: 1.0  # meters above table
+  table:
+    size: [1.0, 1.0, 0.02]  # width, depth, height
+    height: 0.75  # table top height
+  physics:
+    settle_steps: 500
+    gravity: [0, 0, -9.81]
+
+# --- Paint3D ---
+# 의존성: kaolin >= 0.18.0 (NVIDIA 공식 빌드 필요, PyPI placeholder 아님)
+# 참고: torch 2.9+ 에서는 kaolin 프리빌드 wheel이 없을 수 있음
+#       의존성 미충족 시 E2는 자동 스킵되며, Phase F에서 랜덤 색상으로 대체됨
+paint3d:
+  repo: "https://github.com/OpenTexture/Paint3D"
+  pytorch_version: "2.8.0"  # kaolin 0.18.0 호환 버전
+  cuda_version: "cu128"     # Blackwell 최소 요구사항
+  kaolin_version: "0.18.0"
+  kaolin_wheel_url: "https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.8.0_cu128.html"
+  texture_resolution: 2048  # 2K UV maps
+  min_texture_size: 512     # 이 크기 미만의 material_*.png는 더미로 간주
+
+# --- MLLM ---
+mllm:
+  # Qwen3-VL-32B: BF16 ~64GB VRAM, fits 96GB GPU without quantization
+  # MMMU 76.0 (GPT-4o 69.1 대비 +6.9), Qwen2.5-VL-72B급 성능에 파라미터 절반
+  model_name: "Qwen/Qwen3-VL-32B-Instruct"
+  quantization: null  # no quantization needed for 96GB GPU
+  max_tokens: 2048
+  temperature: 0.1
+  num_rgb_views: 1  # vlm이 보는 사진 수 
+  semantic_attrs:
+    - "object_category"
+    - "intention"
+    - "contact_parts"
+    - "grasp_direction"
+
+# --- Affordance GT ---
+affordance:
+  num_object_points: 4096
+  num_hand_surface_points: 2048  # per grasp
+  knn_neighbors: 20  # for Gaussian smoothing
+  score_method: "gaussian"  # exp(-d/sigma)
+
+# --- Open-set Split ---
+open_set:
+  num_splits: 2  # A and B
+  unseen_ratio: 0.2  # 20% categories as unseen
+  seen_train_ratio: 0.8  # 80% of seen objects for train
+  seed: 42
+
+# --- Rendering ---
+rendering:
+  image_width: 640
+  image_height: 480
+  lens_mm: 50  # camera lens focal length
+  depth_format: "exr"  # or "png16"
+  use_segmentation: true
+  render_samples: 128  # Blender cycles samples
+
+# --- Point Cloud ---
+pointcloud:
+  voxel_size: 0.002  # 2mm voxel for downsampling
+  num_final_points: 4096
+  remove_table: true
+  outlier_nb_neighbors: 20
+  outlier_std_ratio: 2.0
+
+# --- Subprocess Timeouts (초) ---
+timeouts:
+  blenderproc_scene: 300   # Phase D physics settle
+  paint3d: 600             # Phase E texture generation
+  uv_unwrap: 60            # Phase E UV unwrap
+  blenderproc_render: 600  # Phase F rendering
+  mllm_inference: 120      # Phase G MLLM per sample
