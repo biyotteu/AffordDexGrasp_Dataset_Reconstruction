@@ -62,17 +62,33 @@ scene:
     gravity: [0, 0, -9.81]
 
 # --- Paint3D ---
-# 의존성: kaolin >= 0.18.0 (NVIDIA 공식 빌드 필요, PyPI placeholder 아님)
-# 참고: torch 2.9+ 에서는 kaolin 프리빌드 wheel이 없을 수 있음
-#       의존성 미충족 시 E2는 자동 스킵되며, Phase F에서 랜덤 색상으로 대체됨
+# Paint3D는 Python 3.8 + PyTorch 1.12.1 + CUDA 11.3 환경 필요
+# 메인 프로젝트(Python 3.10)와 호환 불가 → 별도 conda 환경에서 실행
 paint3d:
   repo: "https://github.com/OpenTexture/Paint3D"
-  pytorch_version: "2.8.0"  # kaolin 0.18.0 호환 버전
-  cuda_version: "cu128"     # Blackwell 최소 요구사항
-  kaolin_version: "0.18.0"
-  kaolin_wheel_url: "https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.8.0_cu128.html"
-  texture_resolution: 2048  # 2K UV maps
-  min_texture_size: 512     # 이 크기 미만의 material_*.png는 더미로 간주
+  clone_dir: "thirdparty/Paint3D"         # git clone 경로
+  conda_env: "paint3d"                    # conda 환경 이름
+  conda_python: null                      # 자동 감지 (conda run 사용). 직접 지정 시: "/path/to/envs/paint3d/bin/python"
+  # Paint3D 원본 environment.yaml 기준 의존성:
+  #   python=3.8.5, pytorch=1.12.1, cudatoolkit=11.3
+  #   kaolin==0.13.0, diffusers==0.25.0, trimesh, xatlas 등
+  kaolin_version: "0.13.0"
+  kaolin_wheel_url: "https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-1.12.1_cu113.html"
+  texture_resolution: 2048                # 2K UV maps
+  min_texture_size: 512                   # 이 크기 미만의 material_*.png는 더미로 간주
+  # Paint3D config 경로 (clone_dir 기준 상대경로)
+  # Stage 1 (coarse): depth-conditioned inpainting
+  sd_config_stage1: "controlnet/config/depth_based_inpaint_template.yaml"
+  # Stage 2 (refine): UV-position-conditioned refinement
+  sd_config_stage2: "controlnet/config/UV_based_inpaint_template.yaml"
+  render_config: "paint3d/config/train_config_paint3d.py"
+  # HuggingFace pretrained 모델 (첫 실행 시 자동 다운로드됨)
+  # - runwayml/stable-diffusion-v1-5
+  # - lllyasviel/control_v11f1p_sd15_depth
+  # - lllyasviel/control_v11p_sd15_inpaint
+  # - lllyasviel/control_v11f1e_sd15_tile
+  # - GeorgeQi/Paint3d_UVPos_Control
+  # - GeorgeQi/realisticVisionV13_v13
 
 # --- MLLM ---
 mllm:

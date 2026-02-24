@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 """
 Phase E: Paint3D 텍스처 생성/적용 (MLLM용 Realistic RGB 준비)
+- E0: Paint3D conda 환경 감지/생성
 - E1: 메쉬 전처리 (UV unwrap)
-- E2: Paint3D 실행 (PyTorch Nightly cu128 포팅)
+- E2: Paint3D 실행 (별도 conda 환경)
 
-Requirements:
-  # 1) PyTorch Nightly for Blackwell (RTX PRO 6000):
-  pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu128
+Paint3D는 Python 3.8 + PyTorch 1.12.1 + CUDA 11.3 기반이므로
+메인 파이프라인(Python 3.10)과 별도의 conda 환경에서 실행합니다.
 
-  # 2) Paint3D 클론 및 설치:
-  git clone https://github.com/OpenTexture/Paint3D.git
-  cd Paint3D
-  pip install -r requirements.txt
-
-  # 3) Paint3D 모델 체크포인트 다운로드 (README 참조)
+사전 준비:
+  # 1) Paint3D conda 환경 자동 생성 (E0에서 처리)
+  #    또는 수동:
+  #    conda env create -f thirdparty/Paint3D/environment.yaml
+  #    conda activate paint3d
+  #    pip install kaolin==0.13.0 -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-1.12.1_cu113.html
+  #
+  # 2) Paint3D 클론:
+  #    git clone https://github.com/OpenTexture/Paint3D.git thirdparty/Paint3D
 """
 
 import os
@@ -21,6 +24,7 @@ import sys
 import json
 import argparse
 import subprocess
+import shutil
 from pathlib import Path
 from tqdm import tqdm
 
@@ -39,57 +43,199 @@ UV_UNWRAP_WORKER_SCRIPT = Path("scripts") / "phase_e_uv_unwrap_worker.py"
 
 
 # ============================================================
-# E0: Paint3D 환경 설정 (Blackwell 호환)
+# E0: Paint3D conda 환경 감지/생성
 # ============================================================
+def _get_conda_executable():
+    """conda 실행 파일 경로 반환"""
+    for name in ["conda", "mamba", "micromamba"]:
+        try:
+            result = subprocess.run(
+                [name, "--version"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                return name
+        except FileNotFoundError:
+            continue
+    return None
+
+
+def _conda_env_exists(conda_exe, env_name):
+    """conda 환경이 존재하는지 확인"""
+    try:
+        result = subprocess.run(
+            [conda_exe, "env", "list", "--json"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            for env_path in data.get("envs", []):
+                if Path(env_path).name == env_name:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def _get_conda_python(conda_exe, env_name):
+    """conda 환경의 python 실행 파일 경로 반환"""
+    try:
+        result = subprocess.run(
+            [conda_exe, "run", "-n", env_name, "python", "-c",
+             "import sys; print(sys.executable)"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
 def setup_paint3d_env(cfg):
     """
-    Paint3D를 Blackwell (RTX PRO 6000) 에서 실행하기 위한 환경 설정
+    Paint3D conda 환경 감지 및 생성
 
-    주의사항:
-    - Paint3D는 원래 PyTorch 1.12 + CUDA 11.6용
-    - Blackwell은 sm_120/sm_122 → CUDA 12.8+ 필요
-    - PyTorch Nightly (cu128) 사용
+    반환: (python_path, paint3d_dir) 또는 (None, paint3d_dir)
     """
     print("=" * 60)
-    print("[E0] Paint3D 환경 설정 (Blackwell 포팅)")
+    print("[E0] Paint3D 환경 설정")
     print("=" * 60)
 
-    paint3d_dir = Path("thirdparty/Paint3D")
+    paint3d_cfg = cfg.get('paint3d', {})
+    env_name = paint3d_cfg.get('conda_env', 'paint3d')
+    clone_dir = Path(paint3d_cfg.get('clone_dir', 'thirdparty/Paint3D'))
+    conda_python_override = paint3d_cfg.get('conda_python')
 
-    if not paint3d_dir.exists():
-        print("  Paint3D 클론 중...")
-        subprocess.run([
-            "git", "clone", cfg['paint3d']['repo'],
-            str(paint3d_dir)
-        ], check=True)
+    # --- 1) conda_python이 직접 지정되어 있으면 그것을 사용 ---
+    if conda_python_override:
+        python_path = Path(conda_python_override)
+        if python_path.exists():
+            print(f"  ✅ config에서 직접 지정된 python: {python_path}")
+            _clone_paint3d_if_needed(clone_dir, paint3d_cfg)
+            return str(python_path), str(clone_dir)
+        else:
+            print(f"  ⚠️ 지정된 python 경로 없음: {python_path}")
 
-    # PyTorch 버전 확인
+    # --- 2) conda 실행 파일 확인 ---
+    conda_exe = _get_conda_executable()
+    if not conda_exe:
+        print("  ⚠️ conda/mamba를 찾을 수 없습니다")
+        print("    → Paint3D를 사용하려면 conda를 설치하거나")
+        print("      config에 paint3d.conda_python 경로를 직접 지정하세요")
+        _clone_paint3d_if_needed(clone_dir, paint3d_cfg)
+        return None, str(clone_dir)
+
+    print(f"  conda 실행 파일: {conda_exe}")
+
+    # --- 3) Paint3D 클론 ---
+    _clone_paint3d_if_needed(clone_dir, paint3d_cfg)
+
+    # --- 4) conda 환경 확인/생성 ---
+    if _conda_env_exists(conda_exe, env_name):
+        print(f"  ✅ conda 환경 '{env_name}' 존재")
+    else:
+        print(f"  conda 환경 '{env_name}' 없음 → 생성 중...")
+        env_yaml = clone_dir / "environment.yaml"
+        if env_yaml.exists():
+            print(f"    environment.yaml 사용: {env_yaml}")
+            result = subprocess.run(
+                [conda_exe, "env", "create", "-f", str(env_yaml)],
+                capture_output=True, text=True, timeout=600,
+            )
+            if result.returncode != 0:
+                print(f"    ⚠️ conda env create 실패:")
+                for line in result.stderr.strip().split('\n')[-5:]:
+                    print(f"      {line}")
+                print(f"\n    수동 생성 방법:")
+                print(f"      conda env create -f {env_yaml}")
+                print(f"      conda activate {env_name}")
+                print(f"      pip install kaolin==0.13.0 -f {paint3d_cfg.get('kaolin_wheel_url', '')}")
+                return None, str(clone_dir)
+            print(f"    ✅ conda 환경 '{env_name}' 생성 완료")
+        else:
+            # environment.yaml 없으면 수동 생성
+            print(f"    environment.yaml 없음 → 수동 conda 환경 생성")
+            result = subprocess.run(
+                [conda_exe, "create", "-n", env_name,
+                 "python=3.8.5", "pytorch=1.12.1", "torchvision=0.13.1",
+                 "cudatoolkit=11.3", "-c", "pytorch", "-c", "defaults", "-y"],
+                capture_output=True, text=True, timeout=600,
+            )
+            if result.returncode != 0:
+                print(f"    ⚠️ conda create 실패")
+                return None, str(clone_dir)
+            print(f"    ✅ 기본 환경 생성 완료 (추가 의존성 설치 필요)")
+
+        # kaolin 설치
+        kaolin_ver = paint3d_cfg.get('kaolin_version', '0.13.0')
+        kaolin_url = paint3d_cfg.get('kaolin_wheel_url', '')
+        print(f"    kaolin {kaolin_ver} 설치 중...")
+        subprocess.run(
+            [conda_exe, "run", "-n", env_name,
+             "pip", "install", f"kaolin=={kaolin_ver}", "-f", kaolin_url],
+            capture_output=True, text=True, timeout=300,
+        )
+
+    # --- 5) python 경로 확인 ---
+    python_path = _get_conda_python(conda_exe, env_name)
+    if python_path:
+        print(f"  ✅ Paint3D python: {python_path}")
+        # 주요 의존성 확인
+        _check_paint3d_deps_in_env(conda_exe, env_name)
+    else:
+        print(f"  ⚠️ conda 환경 '{env_name}'에서 python을 찾을 수 없습니다")
+
+    return python_path, str(clone_dir)
+
+
+def _clone_paint3d_if_needed(clone_dir, paint3d_cfg):
+    """Paint3D repo가 없으면 클론"""
+    if not clone_dir.exists():
+        repo_url = paint3d_cfg.get('repo', 'https://github.com/OpenTexture/Paint3D')
+        print(f"  Paint3D 클론 중: {repo_url}")
+        try:
+            subprocess.run(
+                ["git", "clone", repo_url, str(clone_dir)],
+                check=True, capture_output=True, text=True, timeout=120,
+            )
+            print(f"  ✅ 클론 완료: {clone_dir}")
+        except Exception as e:
+            print(f"  ⚠️ 클론 실패: {e}")
+    else:
+        print(f"  ✅ Paint3D 디렉토리: {clone_dir}")
+
+
+def _check_paint3d_deps_in_env(conda_exe, env_name):
+    """Paint3D conda 환경 내 핵심 의존성 확인"""
+    check_script = (
+        "import sys; "
+        "print(f'python={sys.version.split()[0]}'); "
+        "import torch; print(f'torch={torch.__version__}'); "
+        "print(f'cuda={torch.version.cuda}'); "
+        "print(f'gpu_available={torch.cuda.is_available()}'); "
+        "try:\n"
+        "    import kaolin; print(f'kaolin={kaolin.__version__}')\n"
+        "except: print('kaolin=NOT_FOUND'); "
+        "try:\n"
+        "    import diffusers; print(f'diffusers={diffusers.__version__}')\n"
+        "except: print('diffusers=NOT_FOUND')"
+    )
     try:
-        import torch
-        print(f"  PyTorch: {torch.__version__}")
-        print(f"  CUDA: {torch.version.cuda}")
-        print(f"  GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A'}")
-
-        if torch.cuda.is_available():
-            cap = torch.cuda.get_device_capability(0)
-            print(f"  Compute Capability: {cap[0]}.{cap[1]}")
-            if cap[0] >= 12:
-                print("  ✅ Blackwell 아키텍처 감지")
-            else:
-                print(f"  ℹ️ SM {cap[0]}.{cap[1]} 아키텍처")
-    except:
-        print("  ⚠️ PyTorch 미설치")
-        print("  설치 명령:")
-        print("  pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu128")
-
-    # Paint3D 의존성 패치 안내
-    print("\n  [Blackwell 포팅 주의사항]")
-    print("  1. torch.cuda.amp.autocast → torch.amp.autocast('cuda') 로 변경")
-    print("  2. xformers가 Blackwell 미지원시 → attention fallback 사용")
-    print("  3. TORCH_CUDA_ARCH_LIST='12.0' 환경변수 설정")
-    print("  4. diffusers 최신 버전 사용 (Blackwell 호환)")
-
-    return paint3d_dir
+        result = subprocess.run(
+            [conda_exe, "run", "-n", env_name, "python", "-c", check_script],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.strip().split('\n'):
+                if '=' in line:
+                    key, val = line.split('=', 1)
+                    status = "✅" if val != "NOT_FOUND" else "❌"
+                    print(f"    {status} {key}: {val}")
+        else:
+            print(f"    ⚠️ 의존성 체크 실패")
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -98,11 +244,10 @@ def setup_paint3d_env(cfg):
 def _uv_unwrap_subprocess(mesh_path, output_path):
     """Run xatlas UV unwrap in a subprocess to isolate segfaults.
 
-    UV unwrap 로직은 phase_e_uv_unwrap_worker.py에 구현되어 있음.
+    UV unwrap은 메인 환경(python 3.10)에서 실행 가능 (trimesh + xatlas).
     """
     worker = UV_UNWRAP_WORKER_SCRIPT
     if not worker.exists():
-        # Worker 파일이 없으면 에러
         print(f"  ⚠️ UV unwrap worker 스크립트 없음: {worker}")
         return "failed"
 
@@ -127,6 +272,7 @@ def preprocess_meshes_uv(cfg):
     """
     UV가 없는 메쉬에 UV unwrap 수행
     각 메쉬를 subprocess에서 처리 (xatlas segfault 격리)
+    메인 환경(python 3.10)에서 실행됨 — Paint3D 환경 불필요
     """
     print("\n" + "=" * 60)
     print("[E1] 메쉬 UV 전처리")
@@ -135,12 +281,10 @@ def preprocess_meshes_uv(cfg):
     textures_dir = Path(cfg['paths']['textures'])
     textures_dir.mkdir(parents=True, exist_ok=True)
 
-    # Worker 스크립트 존재 확인
     if not UV_UNWRAP_WORKER_SCRIPT.exists():
         print(f"  ⚠️ UV unwrap worker 없음: {UV_UNWRAP_WORKER_SCRIPT}")
         return
 
-    # Mesh index 로드
     index_path = Path(cfg['paths']['processed']) / "obj_mesh_index.json"
     if not index_path.exists():
         print("  ⚠️ mesh index 없음")
@@ -162,7 +306,6 @@ def preprocess_meshes_uv(cfg):
         obj_tex_dir.mkdir(parents=True, exist_ok=True)
 
         output_path = obj_tex_dir / "uv_mesh.obj"
-        # Skip if already done
         if output_path.exists():
             uv_stats["has_uv"] += 1
             continue
@@ -185,10 +328,10 @@ def preprocess_meshes_uv(cfg):
                 uv_stats["failed"] += 1
         except subprocess.TimeoutExpired:
             uv_stats["failed"] += 1
-        except Exception as e:
+        except Exception:
             uv_stats["failed"] += 1
 
-        # Ensure uv_mesh.obj always exists: convert ply/other to obj via trimesh
+        # uv_mesh.obj가 없으면 trimesh로 변환 시도
         if not output_path.exists():
             try:
                 import trimesh
@@ -196,12 +339,10 @@ def preprocess_meshes_uv(cfg):
                 m.export(str(output_path))
                 print(f"    {obj_id}: converted {Path(mesh_path).suffix} -> .obj (no UV)")
             except Exception as conv_e:
-                # Last resort: just copy the file with .obj extension
-                import shutil
                 try:
                     shutil.copy2(mesh_path, str(output_path))
                     print(f"    {obj_id}: copied as .obj fallback")
-                except:
+                except Exception:
                     print(f"    {obj_id}: conversion failed: {conv_e}")
 
     print(f"\n  UV 있음: {uv_stats['has_uv']}")
@@ -213,78 +354,28 @@ def preprocess_meshes_uv(cfg):
 
 
 # ============================================================
-# E2: Paint3D 실행
+# E2: Paint3D 실행 (별도 conda 환경)
 # ============================================================
-def _check_paint3d_deps():
-    """Paint3D 의존성 사전 체크. 문제 있으면 에러 메시지와 함께 False 반환."""
-    issues = []
+def _build_paint3d_cmd(python_path, conda_exe, env_name, worker_path, args_list):
+    """
+    Paint3D worker 실행 명령 구성
 
-    # 1) kaolin 체크
-    try:
-        import kaolin
-        ver = getattr(kaolin, '__version__', 'unknown')
-        if ver == '0.1':
-            issues.append(
-                "kaolin이 PyPI placeholder(0.1)입니다. 진짜 kaolin을 설치하세요:\n"
-                "    pip uninstall kaolin -y\n"
-                "    pip install kaolin==0.18.0 -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.8.0_cu128.html"
-            )
-        else:
-            print(f"  ✅ kaolin {ver}")
-    except ImportError:
-        issues.append(
-            "kaolin이 설치되어 있지 않습니다:\n"
-            "    pip install kaolin==0.18.0 -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.8.0_cu128.html"
-        )
-
-    # 2) diffusers 체크
-    try:
-        import diffusers
-        print(f"  ✅ diffusers {diffusers.__version__}")
-    except ImportError:
-        issues.append("diffusers가 설치되어 있지 않습니다:\n    pip install diffusers")
-
-    # 3) Paint3D 디렉토리 체크
-    paint3d_dir = Path("thirdparty/Paint3D")
-    if not paint3d_dir.exists():
-        issues.append(
-            "Paint3D가 클론되어 있지 않습니다:\n"
-            "    git clone https://github.com/OpenTexture/Paint3D.git thirdparty/Paint3D"
-        )
+    python_path가 있으면 직접 실행, 없으면 conda run 사용
+    """
+    if python_path:
+        return [python_path, str(worker_path)] + args_list
+    elif conda_exe and env_name:
+        return [conda_exe, "run", "--no-capture-output", "-n", env_name,
+                "python", str(worker_path)] + args_list
     else:
-        print(f"  ✅ Paint3D dir: {paint3d_dir}")
-
-    # 4) Paint3D import 테스트
-    if not issues:
-        try:
-            import importlib
-            sys.path.insert(0, str(paint3d_dir))
-            importlib.import_module("paint3d.paint3d")
-            print("  ✅ Paint3D import OK")
-        except Exception as e:
-            issues.append(f"Paint3D import 실패: {e}")
-
-    # 5) GPU 체크
-    try:
-        import torch
-        if torch.cuda.is_available():
-            gpu = torch.cuda.get_device_name(0)
-            cap = torch.cuda.get_device_capability(0)
-            print(f"  ✅ GPU: {gpu} (sm_{cap[0]}{cap[1]})")
-        else:
-            issues.append("CUDA GPU를 사용할 수 없습니다.")
-    except Exception:
-        pass
-
-    return issues
+        return None
 
 
 def _run_fallback_texture(mesh_path, output_dir):
-    """Paint3D 없이 fallback 텍스처 생성 (단색 albedo + textured_mesh.obj 복사)"""
-    import shutil
+    """Paint3D 없이 fallback 텍스처 생성 (메인 환경에서 실행)"""
     os.makedirs(output_dir, exist_ok=True)
 
-    rng = np.random.RandomState(hash(mesh_path) % 2**31)
+    rng = np.random.RandomState(hash(str(mesh_path)) % 2**31)
     color = rng.randint(100, 230, 3).tolist()
 
     texture_size = 1024
@@ -296,41 +387,58 @@ def _run_fallback_texture(mesh_path, output_dir):
     except Exception:
         pass
 
-    # textured_mesh.obj 복사 (원본 메쉬 + mtl 참조 유지)
     textured_path = os.path.join(output_dir, "textured_mesh.obj")
     if not os.path.exists(textured_path):
         try:
-            shutil.copy2(mesh_path, textured_path)
+            shutil.copy2(str(mesh_path), textured_path)
         except Exception:
             pass
 
 
-def run_paint3d(cfg, max_objects=None):
+def run_paint3d(cfg, max_objects=None, paint3d_python=None, paint3d_dir=None):
     """모든 오브젝트에 대해 Paint3D 텍스처 생성"""
     print("\n" + "=" * 60)
     print("[E2] Paint3D 텍스처 생성")
     print("=" * 60)
 
-    # ===== 의존성 사전 체크 =====
-    print("\n  [의존성 체크]")
-    dep_issues = _check_paint3d_deps()
-    use_paint3d = True
-    if dep_issues:
-        use_paint3d = False
-        print("\n  ⚠️ Paint3D 의존성 미충족 → fallback(단색 텍스처) 모드로 실행합니다.")
-        for i, issue in enumerate(dep_issues, 1):
-            print(f"    {i}. {issue}")
-        print("\n  ℹ️  Blackwell GPU (sm_120)의 경우:")
-        print("      pip install torch==2.8.0 --extra-index-url https://download.pytorch.org/whl/cu128")
-        print("      pip install kaolin==0.18.0 -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.8.0_cu128.html")
+    paint3d_cfg = cfg.get('paint3d', {})
+    env_name = paint3d_cfg.get('conda_env', 'paint3d')
+    conda_exe = _get_conda_executable()
+    clone_dir = paint3d_dir or paint3d_cfg.get('clone_dir', 'thirdparty/Paint3D')
+    sd_config_stage1 = paint3d_cfg.get('sd_config_stage1',
+                                        'controlnet/config/depth_based_inpaint_template.yaml')
+    sd_config_stage2 = paint3d_cfg.get('sd_config_stage2',
+                                        'controlnet/config/UV_based_inpaint_template.yaml')
+    render_config = paint3d_cfg.get('render_config', 'paint3d/config/train_config_paint3d.py')
 
-    # Worker 스크립트 확인
-    worker_path = PAINT3D_WORKER_SCRIPT
+    # Paint3D 사용 가능 여부 판단
+    use_paint3d = False
+    if paint3d_python and Path(paint3d_python).exists():
+        use_paint3d = True
+        print(f"  Paint3D python: {paint3d_python}")
+    elif conda_exe and _conda_env_exists(conda_exe, env_name):
+        use_paint3d = True
+        print(f"  Paint3D conda 환경: {env_name} (via {conda_exe})")
+    else:
+        print("  ⚠️ Paint3D 환경 없음 → fallback(단색 텍스처) 모드")
+        print(f"    해결방법:")
+        print(f"    1. conda env create -f {clone_dir}/environment.yaml")
+        print(f"    2. 또는 config에 paint3d.conda_python 경로를 지정")
+
+    # Worker 확인
+    worker_path = PAINT3D_WORKER_SCRIPT.resolve()
     if not worker_path.exists():
-        print(f"  ⚠️ Paint3D worker 스크립트 없음: {worker_path}")
+        print(f"  ⚠️ Paint3D worker 없음: {worker_path}")
+        use_paint3d = False
+
+    # Paint3D 디렉토리 확인
+    if not Path(clone_dir).exists():
+        print(f"  ⚠️ Paint3D 디렉토리 없음: {clone_dir}")
         use_paint3d = False
 
     textures_dir = Path(cfg['paths']['textures'])
+    min_texture_size = paint3d_cfg.get('min_texture_size', 512)
+    timeout = cfg.get('timeouts', {}).get('paint3d', 600)
 
     # Mesh index 로드
     index_path = Path(cfg['paths']['processed']) / "obj_mesh_index.json"
@@ -345,14 +453,7 @@ def run_paint3d(cfg, max_objects=None):
     if max_objects:
         items = items[:max_objects]
 
-    # OakInk 카테고리 매핑 로드 (텍스처 프롬프트용)
-    cat_map = {}
-    cat_file = Path(cfg['paths']['oakink']) / "shape" / "metaV2" / "yodaobject_cat.json"
-    if cat_file.exists():
-        with open(cat_file) as f:
-            cat_map = json.load(f)
-
-    min_texture_size = cfg.get('paint3d', {}).get('min_texture_size', 512)
+    stats = {"success": 0, "fallback": 0, "skipped": 0, "failed": 0}
 
     for obj_id, info in tqdm(items, desc="  Paint3D 실행"):
         obj_tex_dir = textures_dir / obj_id
@@ -360,39 +461,13 @@ def run_paint3d(cfg, max_objects=None):
 
         if not uv_mesh.exists():
             uv_mesh = Path(info['mesh_path'])
-
         if not uv_mesh.exists():
+            stats["skipped"] += 1
             continue
 
-        # Paint3D 진짜 결과가 있으면 스킵
-        mat_files = sorted(
-            list(obj_tex_dir.glob("material_*.png"))
-            + list(obj_tex_dir.glob("material_*.jpg"))
-            + list(obj_tex_dir.glob("material_*.jpeg"))
-        )
-        if mat_files:
-            has_good_texture = False
-            try:
-                from PIL import Image as _PilImg
-                for mf in mat_files:
-                    _mat = _PilImg.open(str(mf))
-                    _w, _h = _mat.size
-                    if _w >= min_texture_size and _h >= min_texture_size:
-                        has_good_texture = True
-                        break
-            except Exception:
-                pass
-            if has_good_texture:
-                continue  # 정상 텍스처 → 스킵
-            else:
-                for mf in mat_files:
-                    print(f"    {obj_id}: {mf.name} is dummy, removing...")
-                    mf.unlink()
-        elif (obj_tex_dir / "textured_mesh.obj").exists() and (obj_tex_dir / "textured_mesh.mtl").exists():
-            pass  # mtl이 있지만 material png가 없는 경우 → 재시도 필요
-
-        # textured_mesh.obj + albedo.png 이미 있으면 스킵
-        if (obj_tex_dir / "textured_mesh.obj").exists() and (obj_tex_dir / "albedo.png").exists():
+        # 이미 완료된 것 스킵
+        if _has_valid_texture(obj_tex_dir, min_texture_size):
+            stats["skipped"] += 1
             continue
 
         # 카테고리 기반 프롬프트 생성
@@ -400,44 +475,79 @@ def run_paint3d(cfg, max_objects=None):
         prompt = f"a realistic {obj_name}, photorealistic texture, detailed surface"
 
         if use_paint3d:
-            cmd = [
-                sys.executable, str(worker_path),
-                "--mesh_path", str(uv_mesh),
-                "--output_dir", str(obj_tex_dir),
+            worker_args = [
+                "--mesh_path", str(uv_mesh.resolve()),
+                "--output_dir", str(obj_tex_dir.resolve()),
                 "--prompt", prompt,
+                "--paint3d_dir", str(Path(clone_dir).resolve()),
+                "--sd_config_stage1", sd_config_stage1,
+                "--sd_config_stage2", sd_config_stage2,
+                "--render_config", render_config,
             ]
+
+            cmd = _build_paint3d_cmd(
+                paint3d_python, conda_exe, env_name, worker_path, worker_args
+            )
+            if not cmd:
+                _run_fallback_texture(str(uv_mesh), str(obj_tex_dir))
+                stats["fallback"] += 1
+                continue
+
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-                if result.returncode != 0:
-                    err_msg = result.stderr.strip().split('\n')[-5:]
-                    print(f"    ⚠️ {obj_id} 실패: {' | '.join(err_msg)}")
-                # 텍스처 결과 검증
-                new_mats = sorted(obj_tex_dir.glob("material_*.png"))
-                if new_mats:
-                    from PIL import Image as _PilChk
-                    for mf in new_mats:
-                        _img = _PilChk.open(str(mf))
-                        _w, _h = _img.size
-                        if _w < min_texture_size or _h < min_texture_size:
-                            log_dir = Path("logs/paint3d_failures")
-                            log_dir.mkdir(parents=True, exist_ok=True)
-                            log_file = log_dir / f"{obj_id}.log"
-                            with open(log_file, 'w') as lf:
-                                lf.write(f"=== {obj_id} ===\nmesh: {uv_mesh}\n")
-                                lf.write(f"material: {mf.name} = {_w}x{_h}\n\n")
-                                lf.write(f"=== STDOUT ===\n{result.stdout or '(empty)'}\n")
-                                lf.write(f"\n=== STDERR ===\n{result.stderr or '(empty)'}\n")
-                            print(f"    ⚠️ {obj_id}: {mf.name}={_w}x{_h} (dummy). Log: {log_file}")
-                            break
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=timeout,
+                )
+                if result.returncode == 0:
+                    stats["success"] += 1
+                else:
+                    # Worker 내부에서 이미 fallback 처리함
+                    if (obj_tex_dir / "albedo.png").exists():
+                        stats["fallback"] += 1
+                    else:
+                        stats["failed"] += 1
+                    if result.stderr:
+                        err_lines = result.stderr.strip().split('\n')[-3:]
+                        tqdm.write(f"    ⚠️ {obj_id}: {' | '.join(err_lines)}")
             except subprocess.TimeoutExpired:
-                print(f"    ⚠️ {obj_id} 타임아웃")
+                tqdm.write(f"    ⚠️ {obj_id} 타임아웃 ({timeout}s)")
+                _run_fallback_texture(str(uv_mesh), str(obj_tex_dir))
+                stats["fallback"] += 1
             except Exception as e:
-                print(f"    ⚠️ {obj_id} 에러: {e}")
+                tqdm.write(f"    ⚠️ {obj_id} 에러: {e}")
+                _run_fallback_texture(str(uv_mesh), str(obj_tex_dir))
+                stats["fallback"] += 1
         else:
             _run_fallback_texture(str(uv_mesh), str(obj_tex_dir))
+            stats["fallback"] += 1
 
-    # 체크포인트: 텍스처 품질 확인
+    print(f"\n  [결과]")
+    print(f"    Paint3D 성공: {stats['success']}")
+    print(f"    Fallback: {stats['fallback']}")
+    print(f"    실패: {stats['failed']}")
+    print(f"    스킵: {stats['skipped']}")
+
     check_texture_quality(cfg)
+
+
+def _has_valid_texture(obj_tex_dir, min_texture_size):
+    """해당 오브젝트에 유효한 텍스처가 있는지 확인"""
+    # Paint3D 원본 결과 (material_*.png)
+    mat_files = list(obj_tex_dir.glob("material_*.png"))
+    if mat_files:
+        try:
+            from PIL import Image
+            for mf in mat_files:
+                img = Image.open(str(mf))
+                if img.size[0] >= min_texture_size and img.size[1] >= min_texture_size:
+                    return True
+        except Exception:
+            pass
+
+    # Fallback 결과 (albedo.png + textured_mesh.obj)
+    if (obj_tex_dir / "textured_mesh.obj").exists() and (obj_tex_dir / "albedo.png").exists():
+        return True
+
+    return False
 
 
 def check_texture_quality(cfg):
@@ -447,6 +557,7 @@ def check_texture_quality(cfg):
     total = 0
     has_albedo = 0
     has_textured_mesh = 0
+    has_paint3d_material = 0
 
     for obj_dir in textures_dir.iterdir():
         if not obj_dir.is_dir():
@@ -456,10 +567,13 @@ def check_texture_quality(cfg):
             has_albedo += 1
         if (obj_dir / "textured_mesh.obj").exists():
             has_textured_mesh += 1
+        if list(obj_dir.glob("material_*.png")):
+            has_paint3d_material += 1
 
     print(f"\n  [텍스처 품질 체크]")
     print(f"    총 오브젝트: {total}")
-    print(f"    albedo 생성: {has_albedo} ({has_albedo/max(total,1)*100:.1f}%)")
+    print(f"    Paint3D 텍스처: {has_paint3d_material} ({has_paint3d_material/max(total,1)*100:.1f}%)")
+    print(f"    albedo (Paint3D+fallback): {has_albedo} ({has_albedo/max(total,1)*100:.1f}%)")
     print(f"    textured mesh: {has_textured_mesh}")
 
 
@@ -476,16 +590,23 @@ def main():
 
     cfg = load_config(args.config)
 
+    paint3d_python = None
+    paint3d_dir = None
+
     if args.step in ["all", "setup"]:
-        setup_paint3d_env(cfg)
+        paint3d_python, paint3d_dir = setup_paint3d_env(cfg)
 
     if args.step in ["all", "uv"]:
         preprocess_meshes_uv(cfg)
 
     if args.step in ["all", "paint3d"]:
-        run_paint3d(cfg, max_objects=args.max_objects)
+        if paint3d_python is None and args.step != "all":
+            # setup을 따로 안 돌렸으면 여기서 감지
+            paint3d_python, paint3d_dir = setup_paint3d_env(cfg)
+        run_paint3d(cfg, max_objects=args.max_objects,
+                    paint3d_python=paint3d_python, paint3d_dir=paint3d_dir)
 
-    if args.step in ["all", "check"]:
+    if args.step == "check":
         check_texture_quality(cfg)
 
     print("\n" + "=" * 60)

@@ -292,20 +292,61 @@ Mesh scale: MJCF `scale="0.001 0.001 0.001"` 파싱하여 자동 적용 (mm → 
 
 ---
 
-## 8. Phase E — Paint3D Fallback (단색 텍스처)
+## 8. Phase E — Paint3D 별도 conda 환경 실행
 
-**파일**: `scripts/phase_e_paint3d_worker.py` → `generate_texture_fallback()`
+**파일**: `scripts/phase_e_paint3d.py`, `scripts/phase_e_paint3d_worker.py`
 
-논문에 언급 없음. Paint3D 실행 환경(kaolin 0.18.0 + PyTorch nightly + CUDA 12.8)이 불충족되거나 Paint3D 자체 오류 시 파이프라인이 중단되지 않도록 Fallback 추가.
+논문에 언급 없음. Paint3D는 Python 3.8 + PyTorch 1.12.1 + CUDA 11.3 기반이고, 메인 파이프라인은 Python 3.10 기반이므로 동일 환경에서 실행 불가. 별도 conda 환경을 자동 감지/생성하여 subprocess로 호출하는 방식으로 해결.
 
-### 동작
+### 실행 구조
 
-1. Paint3D import 실패 또는 실행 오류 발생 시 자동 전환
-2. `hash(mesh_path) % 2^31` 기반 RNG로 물체마다 일관된 단색 결정 (RGB 각 100~230 범위)
-3. PIL로 512×512 단색 텍스처 이미지 생성
-4. 메쉬에 UV 좌표 할당 후 저장
+```
+phase_e_paint3d.py (메인 환경, Python 3.10)
+    │
+    ├── E0: conda 환경 감지 → 없으면 environment.yaml로 자동 생성
+    ├── E1: UV unwrap (메인 환경에서 실행, xatlas)
+    └── E2: subprocess 호출
+            │
+            └── conda run -n paint3d python phase_e_paint3d_worker.py
+                    │
+                    ├── Stage 1: pipeline_paint3d_stage1.py (depth-conditioned)
+                    │   sd_config: controlnet/config/depth_based_inpaint_template.yaml
+                    │
+                    └── Stage 2: pipeline_paint3d_stage2.py (UV-position)
+                        sd_config: controlnet/config/UV_based_inpaint_template.yaml
+```
 
-**Phase G 영향**: Phase G의 MLLM은 물체의 형상을 인식하는 것이 주목적이므로, 단색 텍스처여도 정상 동작함.
+### conda 환경 관리
+
+`pipeline_config.yaml` 설정:
+```yaml
+paint3d:
+  conda_env: "paint3d"      # conda 환경 이름
+  conda_python: null         # 자동 감지. 직접 지정도 가능
+```
+
+환경 감지 순서:
+1. `conda_python` 직접 경로 지정 → 그대로 사용
+2. `conda env list`에서 환경 탐색 → `conda run` 사용
+3. 둘 다 없으면 → `environment.yaml`로 자동 생성 시도
+
+### Paint3D Pretrained 모델
+
+HuggingFace에서 첫 실행 시 자동 다운로드:
+- `runwayml/stable-diffusion-v1-5`
+- `lllyasviel/control_v11f1p_sd15_depth` (Stage 1)
+- `lllyasviel/control_v11p_sd15_inpaint` (Stage 2)
+- `GeorgeQi/Paint3d_UVPos_Control` (Stage 2)
+- `GeorgeQi/realisticVisionV13_v13` (Stage 2 img2img)
+
+### Fallback (단색 텍스처)
+
+Paint3D 실패 시 자동 전환:
+1. `hash(mesh_path) % 2^31` 기반 RNG로 물체마다 일관된 단색 결정 (RGB 각 100~230 범위)
+2. PIL로 1024×1024 단색 텍스처 이미지 생성
+3. 원본 메쉬를 textured_mesh.obj로 복사
+
+**Phase G 영향**: MLLM은 형상 인식이 주목적이므로 단색 텍스처여도 정상 동작함.
 
 ---
 
@@ -349,5 +390,6 @@ Paint3D는 text-to-texture diffusion 모델. 프롬프트가 구체적일수록 
 | Object PC 소스 | H | 렌더링 PC | 메쉬 직접 샘플링 |
 | MJCF 전처리 | H | ❌ 없음 | pytorch_kinematics 호환용 XML sanitize |
 | Link-Mesh 이름 매핑 | H | ❌ 없음 | DexGraspNet/menagerie 간 fuzzy matching |
+| Paint3D conda 환경 분리 | E | ❌ 없음 | 별도 conda 환경 자동 감지/생성 + subprocess 호출 |
 | Paint3D Fallback | E | ❌ 없음 | 단색 텍스처 자동 생성 |
 | Paint3D 텍스처 프롬프트 | E | ❌ 미공개 | `"a realistic {obj_name}, photorealistic texture, detailed surface"` |

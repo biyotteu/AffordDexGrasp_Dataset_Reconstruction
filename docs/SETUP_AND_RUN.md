@@ -114,9 +114,48 @@ BlenderProc으로 tabletop scene을 생성합니다. Physics settle로 오브젝
 
 ### Phase E: Paint3D 텍스처
 
-UV unwrap (xatlas) 후 Paint3D로 realistic 텍스처를 생성합니다. Paint3D 실행 실패 시 기본 색상 텍스처로 자동 대체됩니다.
+UV unwrap (xatlas) 후 Paint3D로 realistic 2K UV texture를 생성합니다.
 
-참고: Paint3D는 kaolin 0.18.0 + PyTorch 2.8.0 + cu128 필요. `pipeline_config.yaml`의 `paint3d` 섹션 참조.
+**중요**: Paint3D는 Python 3.8 + PyTorch 1.12.1 + CUDA 11.3 기반이므로, 메인 환경(Python 3.10)과 별도의 conda 환경에서 실행합니다.
+
+#### Paint3D conda 환경 설정
+
+```bash
+# 방법 1: 자동 (Phase E 실행 시 E0에서 자동 감지/생성)
+python scripts/phase_e_paint3d.py --step setup
+
+# 방법 2: 수동
+git clone https://github.com/OpenTexture/Paint3D.git thirdparty/Paint3D
+conda env create -f thirdparty/Paint3D/environment.yaml
+conda activate paint3d
+pip install kaolin==0.13.0 -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-1.12.1_cu113.html
+```
+
+#### Paint3D Pretrained 모델
+
+Paint3D는 HuggingFace에서 pretrained 모델을 사용합니다. 첫 실행 시 자동 다운로드됩니다:
+
+- `runwayml/stable-diffusion-v1-5` (Stable Diffusion 베이스)
+- `lllyasviel/control_v11f1p_sd15_depth` (Stage 1: depth ControlNet)
+- `lllyasviel/control_v11p_sd15_inpaint` (Stage 2: inpaint ControlNet)
+- `lllyasviel/control_v11f1e_sd15_tile` (Stage 2: tile ControlNet)
+- `GeorgeQi/Paint3d_UVPos_Control` (Stage 2: UV position ControlNet)
+- `GeorgeQi/realisticVisionV13_v13` (Stage 2: img2img SD model)
+
+#### 실행 구조
+
+```
+메인 환경 (Python 3.10)                 Paint3D 환경 (Python 3.8)
+  phase_e_paint3d.py                      phase_e_paint3d_worker.py
+       │                                         │
+       ├── E0: conda 환경 감지/생성                │
+       ├── E1: UV unwrap (xatlas)                 │
+       └── E2: subprocess 호출 ───────────────→   │
+            conda run -n paint3d python            ├── Stage 1: depth inpainting (coarse)
+                                                   └── Stage 2: UV refinement (refined)
+```
+
+Paint3D가 실패하면 단색 텍스처로 자동 대체됩니다. Phase G의 MLLM은 형상 인식이 주목적이므로 단색 텍스처여도 작동합니다.
 
 ### Phase F: 5-view RGB-D 렌더링
 
@@ -190,6 +229,22 @@ python scripts/phase_a_download.py --step dexgraspnet
 ### Paint3D 실패
 
 Fallback 텍스처가 자동 생성됩니다. MLLM은 형상 인식이 주목적이므로 단색이어도 작동합니다.
+
+```bash
+# Paint3D conda 환경 확인
+conda env list | grep paint3d
+
+# conda 환경 수동 생성 (자동 생성 실패 시)
+conda env create -f thirdparty/Paint3D/environment.yaml
+
+# Paint3D 디렉토리 확인
+ls thirdparty/Paint3D/pipeline_paint3d_stage1.py
+
+# config 직접 지정 (환경 자동 감지 안 될 때)
+# configs/pipeline_config.yaml:
+#   paint3d:
+#     conda_python: "/home/user/miniconda3/envs/paint3d/bin/python"
+```
 
 ### MLLM OOM
 ```bash

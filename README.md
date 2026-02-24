@@ -36,7 +36,7 @@ Phase I: 최종 패키징 + QC
 ## 빠른 시작
 
 ```bash
-# 1. 환경 설정
+# 1. 메인 환경 설정 (Python 3.10)
 conda create -n afforddex python=3.10
 conda activate afforddex
 
@@ -46,7 +46,13 @@ pip install --pre torch torchvision --index-url https://download.pytorch.org/whl
 # 의존성 설치
 pip install -r requirements.txt
 
-# 2. 전체 파이프라인 실행
+# 2. Paint3D 환경 설정 (Python 3.8, Phase E 전용)
+git clone https://github.com/OpenTexture/Paint3D.git thirdparty/Paint3D
+conda env create -f thirdparty/Paint3D/environment.yaml
+conda run -n paint3d pip install kaolin==0.13.0 -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-1.12.1_cu113.html
+
+# 3. 전체 파이프라인 실행
+conda activate afforddex
 ./run_pipeline.sh all
 
 # 또는 단계별 실행
