@@ -125,14 +125,37 @@ def run_physics_settle(cfg, max_scenes=None):
     if max_scenes:
         jobs = jobs[:max_scenes]
 
-    for job in tqdm(jobs, desc="  Physics settle"):
+    fail_count = 0
+    consecutive_fails = 0
+    MAX_CONSECUTIVE_FAILS = 20  # 연속 20회 실패 시 중단
+
+    for idx, job in enumerate(tqdm(jobs, desc="  Physics settle")):
         scene_dir = scenes_dir / job['scene_id']
+        result_pose = scene_dir / "object_pose.json"
+
+        # 이미 완료된 scene은 스킵
+        if result_pose.exists():
+            consecutive_fails = 0
+            continue
+
         scene_dir.mkdir(parents=True, exist_ok=True)
 
         # Job 파일 저장
         job_file = scene_dir / "job.json"
         with open(job_file, 'w') as f:
             json.dump(job, f, indent=2)
+
+        # mesh 파일 존재 확인
+        mesh_path = Path(job.get('mesh_path', ''))
+        if not mesh_path.exists():
+            print(f"    ⚠️ {job['scene_id']} 스킵: mesh 없음 → {mesh_path}")
+            fail_count += 1
+            consecutive_fails += 1
+            if consecutive_fails >= MAX_CONSECUTIVE_FAILS:
+                print(f"\n  ❌ 연속 {MAX_CONSECUTIVE_FAILS}회 실패 - 중단합니다.")
+                print(f"     마지막 실패 원인: mesh 파일 없음")
+                break
+            continue
 
         # BlenderProc 실행
         cmd = [
@@ -147,12 +170,46 @@ def run_physics_settle(cfg, max_scenes=None):
                 cmd, capture_output=True, text=True, timeout=300
             )
             if result.returncode != 0:
-                print(f"    ⚠️ {job['scene_id']} 실패: {result.stderr[:200]}")
+                # stderr 마지막 줄들이 실제 에러 → 뒤에서부터 표시
+                stderr_lines = result.stderr.strip().split('\n')
+                # 마지막 5줄 (실제 에러 메시지)
+                error_tail = '\n'.join(stderr_lines[-5:]) if len(stderr_lines) > 5 else result.stderr
+                print(f"    ⚠️ {job['scene_id']} 실패:\n{error_tail}")
+
+                # 에러 로그 저장
+                log_file = scene_dir / "error.log"
+                with open(log_file, 'w') as f:
+                    f.write(f"=== STDERR ===\n{result.stderr}\n\n=== STDOUT ===\n{result.stdout}")
+
+                fail_count += 1
+                consecutive_fails += 1
+            else:
+                consecutive_fails = 0  # 성공 시 리셋
+
         except subprocess.TimeoutExpired:
-            print(f"    ⚠️ {job['scene_id']} 타임아웃")
+            print(f"    ⚠️ {job['scene_id']} 타임아웃 (300초)")
+            fail_count += 1
+            consecutive_fails += 1
         except FileNotFoundError:
             print("    ⚠️ blenderproc 미설치. pip install blenderproc")
             break
+
+        # 연속 실패 임계값 체크
+        if consecutive_fails >= MAX_CONSECUTIVE_FAILS:
+            print(f"\n  ❌ 연속 {MAX_CONSECUTIVE_FAILS}회 실패 - 시스템 문제 의심. 중단합니다.")
+            print(f"     에러 로그 확인: {scene_dir}/error.log")
+            break
+
+        # 리소스 정리: 50개마다 /tmp BlenderProc 캐시 정리
+        if (idx + 1) % 50 == 0:
+            import glob, shutil
+            for tmp_dir in glob.glob("/tmp/blender_proc_*"):
+                try:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                except:
+                    pass
+
+    print(f"\n  실패: {fail_count}개 / 전체: {len(jobs)}개")
 
 
 # ============================================================

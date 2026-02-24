@@ -1,9 +1,6 @@
-#!/usr/bin/env python3
-"""
-Phase D BlenderProc Worker: Tabletop scene 생성 + Physics settle
-실행: blenderproc run phase_d_blenderproc_worker.py --job <job.json> --output_dir <dir>
-"""
-import blenderproc as bproc
+import blenderproc as bproc  # 반드시 첫 줄이어야 함 (BlenderProc 요구사항)
+# Phase D BlenderProc Worker: Tabletop scene 생성 + Physics settle
+# 실행: blenderproc run phase_d_blenderproc_worker.py --job <job.json> --output_dir <dir>
 import sys
 import os
 import json
