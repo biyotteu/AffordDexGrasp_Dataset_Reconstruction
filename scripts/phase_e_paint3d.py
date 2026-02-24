@@ -181,8 +181,12 @@ def setup_paint3d_env(cfg):
     python_path = _get_conda_python(conda_exe, env_name)
     if python_path:
         print(f"  ✅ Paint3D python: {python_path}")
-        # 주요 의존성 확인
-        _check_paint3d_deps_in_env(conda_exe, env_name)
+        # 주요 의존성 확인 및 누락 시 자동 설치
+        missing = _check_paint3d_deps_in_env(conda_exe, env_name)
+        if missing:
+            _install_missing_deps(conda_exe, env_name, missing, clone_dir)
+            # 재확인
+            _check_paint3d_deps_in_env(conda_exe, env_name)
     else:
         print(f"  ⚠️ conda 환경 '{env_name}'에서 python을 찾을 수 없습니다")
 
@@ -207,38 +211,103 @@ def _clone_paint3d_if_needed(clone_dir, paint3d_cfg):
 
 
 def _check_paint3d_deps_in_env(conda_exe, env_name):
-    """Paint3D conda 환경 내 핵심 의존성 확인"""
-    # python -c 에서는 세미콜론으로 한줄로 작성해야 함 (try/except도 한줄로)
-    check_script = (
-        "import sys; "
-        "print(f'python={sys.version.split()[0]}'); "
-        "import torch; print(f'torch={torch.__version__}'); "
-        "print(f'cuda={torch.version.cuda}'); "
-        "print(f'gpu_available={torch.cuda.is_available()}'); "
-        "exec(\"try:\\n import kaolin\\n print(f'kaolin={kaolin.__version__}')\\nexcept:\\n print('kaolin=NOT_FOUND')\"); "
-        "exec(\"try:\\n import diffusers\\n print(f'diffusers={diffusers.__version__}')\\nexcept:\\n print('diffusers=NOT_FOUND')\")"
-    )
-    try:
-        result = subprocess.run(
-            [conda_exe, "run", "-n", env_name, "python", "-c", check_script],
-            capture_output=True, text=True, timeout=60,
-        )
-        if result.returncode == 0:
-            for line in result.stdout.strip().split('\n'):
-                if '=' in line:
-                    key, val = line.split('=', 1)
-                    status = "✅" if val != "NOT_FOUND" else "❌"
-                    print(f"    {status} {key}: {val}")
-        else:
-            print(f"    ⚠️ 의존성 체크 실패:")
-            if result.stderr:
-                for line in result.stderr.strip().split('\n')[-5:]:
-                    print(f"      {line}")
-            if result.stdout:
-                for line in result.stdout.strip().split('\n')[-3:]:
-                    print(f"      {line}")
-    except Exception as e:
-        print(f"    ⚠️ 의존성 체크 예외: {e}")
+    """Paint3D conda 환경 내 핵심 의존성 확인. 누락된 패키지 목록 반환."""
+    # 개별적으로 체크 (하나가 실패해도 나머지 체크 가능)
+    deps_to_check = {
+        "torch": "import torch; print(torch.__version__)",
+        "cuda": "import torch; print(torch.version.cuda)",
+        "gpu": "import torch; print(torch.cuda.is_available())",
+        "kaolin": "import kaolin; print(kaolin.__version__)",
+        "diffusers": "import diffusers; print(diffusers.__version__)",
+        "transformers": "import transformers; print(transformers.__version__)",
+        "accelerate": "import accelerate; print(accelerate.__version__)",
+    }
+
+    missing = []
+    for name, script in deps_to_check.items():
+        try:
+            result = subprocess.run(
+                [conda_exe, "run", "-n", env_name, "python", "-c", script],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode == 0:
+                val = result.stdout.strip().split('\n')[-1]
+                print(f"    ✅ {name}: {val}")
+            else:
+                print(f"    ❌ {name}: NOT_FOUND")
+                missing.append(name)
+        except Exception:
+            print(f"    ❌ {name}: CHECK_FAILED")
+            missing.append(name)
+
+    return missing
+
+
+# Paint3D가 필요로 하는 pip 패키지 (environment.yaml 기반)
+PAINT3D_PIP_DEPS = [
+    "diffusers==0.25.0",
+    "accelerate==0.29.2",
+    "transformers==4.27.1",
+    "omegaconf==2.1.1",
+    "pytorch-lightning==1.4.2",
+    "einops==0.3.0",
+    "kornia==0.6",
+    "open_clip_torch==2.0.2",
+    "trimesh==3.20.2",
+    "xatlas==0.0.7",
+    "loguru==0.7.2",
+    "albumentations==1.3.0",
+    "imageio==2.9.0",
+    "webdataset==0.2.5",
+]
+
+
+def _install_missing_deps(conda_exe, env_name, missing, clone_dir):
+    """누락된 Paint3D 의존성 자동 설치"""
+    print(f"\n  📦 누락된 의존성 설치 중: {', '.join(missing)}")
+
+    # environment.yaml의 pip 의존성 전체 설치가 가장 확실
+    env_yaml = Path(clone_dir) / "environment.yaml"
+    if env_yaml.exists():
+        print(f"    environment.yaml에서 pip 의존성 설치...")
+        # environment.yaml에서 pip deps만 추출하여 설치
+        try:
+            with open(env_yaml) as f:
+                env_data = yaml.safe_load(f)
+            pip_deps = []
+            for dep in env_data.get('dependencies', []):
+                if isinstance(dep, dict) and 'pip' in dep:
+                    pip_deps = dep['pip']
+                    break
+
+            if pip_deps:
+                result = subprocess.run(
+                    [conda_exe, "run", "-n", env_name,
+                     "pip", "install"] + pip_deps,
+                    capture_output=True, text=True, timeout=600,
+                )
+                if result.returncode == 0:
+                    print(f"    ✅ pip 의존성 {len(pip_deps)}개 설치 완료")
+                    return
+                else:
+                    print(f"    ⚠️ 일부 설치 실패, 개별 설치 시도...")
+        except Exception as e:
+            print(f"    ⚠️ environment.yaml 파싱 실패: {e}")
+
+    # 폴백: 핵심 패키지만 개별 설치
+    for pkg in PAINT3D_PIP_DEPS:
+        pkg_name = pkg.split('==')[0]
+        if pkg_name in missing or pkg_name in ['diffusers', 'accelerate', 'transformers']:
+            print(f"    설치: {pkg}")
+            result = subprocess.run(
+                [conda_exe, "run", "-n", env_name, "pip", "install", pkg],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode == 0:
+                print(f"    ✅ {pkg}")
+            else:
+                err = result.stderr.strip().split('\n')[-1] if result.stderr else "unknown"
+                print(f"    ❌ {pkg}: {err}")
 
 
 # ============================================================
@@ -398,8 +467,8 @@ def _run_fallback_texture(mesh_path, output_dir):
             pass
 
 
-def run_paint3d(cfg, max_objects=None, paint3d_python=None, paint3d_dir=None):
-    """모든 오브젝트에 대해 Paint3D 텍스처 생성"""
+def run_paint3d(cfg, max_objects=None, paint3d_python=None, paint3d_dir=None, force=False):
+    """모든 오브젝트에 대해 Paint3D 텍스처 생성. force=True이면 기존 결과 무시."""
     print("\n" + "=" * 60)
     print("[E2] Paint3D 텍스처 생성")
     print("=" * 60)
@@ -468,10 +537,21 @@ def run_paint3d(cfg, max_objects=None, paint3d_python=None, paint3d_dir=None):
             stats["skipped"] += 1
             continue
 
-        # 이미 완료된 것 스킵
-        if _has_valid_texture(obj_tex_dir, min_texture_size):
+        # 이미 완료된 것 스킵 (force 모드에서는 fallback만 있는 경우 재실행)
+        if not force and _has_valid_texture(obj_tex_dir, min_texture_size):
             stats["skipped"] += 1
             continue
+        if force and _has_valid_texture(obj_tex_dir, min_texture_size):
+            # force 모드: Paint3D 진짜 텍스처(material_*.png)가 있으면 스킵, fallback만 있으면 재실행
+            has_real_texture = bool(list(obj_tex_dir.glob("material_*.png")))
+            if has_real_texture:
+                stats["skipped"] += 1
+                continue
+            # fallback 결과 제거 후 재실행
+            for f in ["albedo.png", "textured_mesh.obj"]:
+                fp = obj_tex_dir / f
+                if fp.exists():
+                    fp.unlink()
 
         # 카테고리 기반 프롬프트 생성
         obj_name = info.get('name', 'object')
@@ -608,6 +688,8 @@ def main():
     parser.add_argument("--step", choices=["all", "setup", "uv", "paint3d", "check"],
                        default="all")
     parser.add_argument("--max_objects", type=int, default=None)
+    parser.add_argument("--force", action="store_true",
+                       help="기존 fallback 텍스처를 무시하고 Paint3D로 재실행")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -626,7 +708,8 @@ def main():
             # setup을 따로 안 돌렸으면 여기서 감지
             paint3d_python, paint3d_dir = setup_paint3d_env(cfg)
         run_paint3d(cfg, max_objects=args.max_objects,
-                    paint3d_python=paint3d_python, paint3d_dir=paint3d_dir)
+                    paint3d_python=paint3d_python, paint3d_dir=paint3d_dir,
+                    force=args.force)
 
     if args.step == "check":
         check_texture_quality(cfg)
