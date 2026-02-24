@@ -158,7 +158,6 @@ final_dataset/
 | [SETUP_AND_RUN.md](docs/SETUP_AND_RUN.md) | 환경 설정, 의존성 설치, 단계별 실행 가이드 |
 | [PAPER_IMPLEMENTATION.md](docs/PAPER_IMPLEMENTATION.md) | 논문 수식·설정값과 구현 간 매핑, 차이점 분석 |
 | [DESIGN_DECISIONS.md](docs/DESIGN_DECISIONS.md) | 논문 미공개 부분 자체 설계 결정 사항 (프롬프트, fallback, 매핑 테이블 등) |
-| [PIPELINE_VERIFICATION.md](docs/PIPELINE_VERIFICATION.md) | 파이프라인 검증 보고서 |
 
 ## 참고
 
