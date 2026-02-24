@@ -113,6 +113,8 @@ AffordDexGraspData/
 │   └── visualize_affordance.py   # Affordance 시각화
 ├── docs/
 │   ├── SETUP_AND_RUN.md          # 상세 설정/실행 가이드
+│   ├── PAPER_IMPLEMENTATION.md   # 논문 vs 구현 매핑 (수식, 설정값, 차이점)
+│   ├── DESIGN_DECISIONS.md       # 논문 미공개 부분 자체 설계 결정 사항
 │   └── PIPELINE_VERIFICATION.md  # 파이프라인 검증 보고서
 ├── run_pipeline.sh               # 실행 스크립트 (Linux)
 ├── run_pipeline.bat              # 실행 스크립트 (Windows)
@@ -148,6 +150,15 @@ final_dataset/
 | `mllm.model_name` | Qwen3-VL-32B | MLLM 모델 |
 | `scene.num_cameras` | 5 | 렌더링 카메라 수 (4 lateral + 1 top) |
 | `rendering.image_width` | 640 | 렌더링 해상도 |
+
+## 문서
+
+| 문서 | 내용 |
+|------|------|
+| [SETUP_AND_RUN.md](docs/SETUP_AND_RUN.md) | 환경 설정, 의존성 설치, 단계별 실행 가이드 |
+| [PAPER_IMPLEMENTATION.md](docs/PAPER_IMPLEMENTATION.md) | 논문 수식·설정값과 구현 간 매핑, 차이점 분석 |
+| [DESIGN_DECISIONS.md](docs/DESIGN_DECISIONS.md) | 논문 미공개 부분 자체 설계 결정 사항 (프롬프트, fallback, 매핑 테이블 등) |
+| [PIPELINE_VERIFICATION.md](docs/PIPELINE_VERIFICATION.md) | 파이프라인 검증 보고서 |
 
 ## 참고
 
