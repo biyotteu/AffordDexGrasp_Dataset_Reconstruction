@@ -122,10 +122,18 @@ def create_tabletop_scene(job, output_dir):
 
 
 if __name__ == "__main__":
+    # Blender 직접 실행 시 argv에 Blender 인자가 포함됨
+    # "--" 뒤의 인자만 파싱해야 함
+    argv = sys.argv
+    if "--" in argv:
+        argv = argv[argv.index("--") + 1:]
+    else:
+        argv = argv[1:]  # blenderproc run 방식 fallback
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--job", required=True, help="Path to job JSON file")
     parser.add_argument("--output_dir", required=True, help="Output directory")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     with open(args.job) as f:
         job = json.load(f)

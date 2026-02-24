@@ -97,6 +97,92 @@ def generate_scene_jobs(cfg):
 # ============================================================
 WORKER_SCRIPT = Path("scripts") / "phase_d_blenderproc_worker.py"
 
+# Blender 실행 경로 자동 탐색
+DEFAULT_BLENDER_PATHS = [
+    Path.home() / "blender" / "blender-4.2.1-linux-x64" / "blender",
+    Path.home() / "blender" / "blender-3.6.0-linux-x64" / "blender",
+    Path("/usr/local/bin/blender"),
+    Path("/usr/bin/blender"),
+    Path("/snap/bin/blender"),
+]
+
+
+def _find_blender(cfg):
+    """Blender 실행 파일 경로 탐색"""
+    # config에 지정된 경로 우선
+    blender_path = cfg.get('scene', {}).get('blender_path')
+    if blender_path and Path(blender_path).exists():
+        return str(blender_path)
+
+    # 기본 경로 탐색
+    for p in DEFAULT_BLENDER_PATHS:
+        if p.exists():
+            return str(p)
+
+    # which로 탐색
+    import subprocess
+    try:
+        result = subprocess.run(["which", "blender"], capture_output=True, text=True)
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except FileNotFoundError:
+        pass
+
+    return None
+
+
+def _get_blender_python(blender_path):
+    """Blender 내장 Python 경로 반환"""
+    blender_dir = Path(blender_path).parent
+    # Blender 4.x: <blender_dir>/<version>/python/bin/python3.xx
+    for version_dir in sorted(blender_dir.glob("[0-9]*.[0-9]*"), reverse=True):
+        python_dir = version_dir / "python" / "bin"
+        for pybin in sorted(python_dir.glob("python3*"), reverse=True):
+            if pybin.is_file() and not pybin.name.endswith("-config"):
+                return str(pybin)
+    return None
+
+
+def _ensure_blenderproc_in_blender(blender_python):
+    """Blender 내장 Python에 blenderproc이 설치되어 있는지 확인하고, 없으면 설치"""
+    import subprocess
+
+    # blenderproc 설치 확인
+    result = subprocess.run(
+        [blender_python, "-c", "import blenderproc; print(blenderproc.__version__)"],
+        capture_output=True, text=True, timeout=30
+    )
+    if result.returncode == 0:
+        version = result.stdout.strip()
+        print(f"  ✅ Blender Python에 blenderproc {version} 설치됨")
+        return True
+
+    # 설치 시도
+    print("  📦 Blender Python에 blenderproc 설치 중...")
+    result = subprocess.run(
+        [blender_python, "-m", "pip", "install", "blenderproc"],
+        capture_output=True, text=True, timeout=300
+    )
+    if result.returncode == 0:
+        print("  ✅ blenderproc 설치 완료")
+        return True
+    else:
+        # pip가 없으면 ensurepip 먼저
+        subprocess.run(
+            [blender_python, "-m", "ensurepip", "--upgrade"],
+            capture_output=True, text=True, timeout=60
+        )
+        result = subprocess.run(
+            [blender_python, "-m", "pip", "install", "blenderproc"],
+            capture_output=True, text=True, timeout=300
+        )
+        if result.returncode == 0:
+            print("  ✅ blenderproc 설치 완료 (ensurepip 후)")
+            return True
+
+    print(f"  ❌ blenderproc 설치 실패: {result.stderr[-300:]}")
+    return False
+
 
 def run_physics_settle(cfg, max_scenes=None):
     """모든 scene에 대해 BlenderProc physics settle 실행"""
@@ -118,18 +204,32 @@ def run_physics_settle(cfg, max_scenes=None):
         print(f"  ⚠️ Worker 스크립트 없음: {worker_path}")
         return
 
-    # BlenderProc 환경 변수 정리: conda PYTHONPATH 오염 방지
-    # Blender는 자체 Python(3.11)을 사용하므로 conda의 site-packages가 섞이면 안 됨
+    # --- Blender 직접 실행 방식 (conda numpy 충돌 방지) ---
+    blender_path = _find_blender(cfg)
+    if not blender_path:
+        print("  ❌ Blender를 찾을 수 없습니다.")
+        print("     config에 scene.blender_path를 지정하거나, ~/blender/ 에 설치하세요.")
+        return
+    print(f"  Blender: {blender_path}")
+
+    blender_python = _get_blender_python(blender_path)
+    if blender_python:
+        print(f"  Blender Python: {blender_python}")
+        if not _ensure_blenderproc_in_blender(blender_python):
+            print("  ❌ Blender에 blenderproc 설치 실패 - 중단")
+            return
+    else:
+        print("  ⚠️ Blender 내장 Python을 찾을 수 없음 - blenderproc run 방식으로 fallback")
+
+    # 환경 변수 정리: conda 경로 완전 제거 (Blender 자체 Python만 사용)
     clean_env = os.environ.copy()
-    conda_prefix = clean_env.get('CONDA_PREFIX', '')
-    for key in ['PYTHONPATH', 'PYTHONHOME']:
+    for key in ['PYTHONPATH', 'PYTHONHOME', 'CONDA_PREFIX',
+                'CONDA_DEFAULT_ENV', 'CONDA_PYTHON_EXE']:
         clean_env.pop(key, None)
-    # PATH에서 conda의 bin만 blenderproc 찾을 수 있도록 유지하되,
-    # Blender가 자체 Python을 사용하도록 나머지는 정리
-    # LD_LIBRARY_PATH에서 conda lib 제거 (numpy .so 충돌 방지)
+    # LD_LIBRARY_PATH에서 conda 관련 경로 제거
     if 'LD_LIBRARY_PATH' in clean_env:
         ld_paths = clean_env['LD_LIBRARY_PATH'].split(':')
-        ld_paths = [p for p in ld_paths if 'anaconda' not in p and 'conda' not in p and 'envs' not in p]
+        ld_paths = [p for p in ld_paths if 'anaconda' not in p and 'conda' not in p]
         clean_env['LD_LIBRARY_PATH'] = ':'.join(ld_paths) if ld_paths else ''
 
     jobs = []
@@ -142,7 +242,7 @@ def run_physics_settle(cfg, max_scenes=None):
 
     fail_count = 0
     consecutive_fails = 0
-    MAX_CONSECUTIVE_FAILS = 20  # 연속 20회 실패 시 중단
+    MAX_CONSECUTIVE_FAILS = 20
 
     for idx, job in enumerate(tqdm(jobs, desc="  Physics settle")):
         scene_dir = scenes_dir / job['scene_id']
@@ -167,15 +267,15 @@ def run_physics_settle(cfg, max_scenes=None):
             fail_count += 1
             consecutive_fails += 1
             if consecutive_fails >= MAX_CONSECUTIVE_FAILS:
-                print(f"\n  ❌ 연속 {MAX_CONSECUTIVE_FAILS}회 실패 - 중단합니다.")
-                print(f"     마지막 실패 원인: mesh 파일 없음")
+                print(f"\n  ❌ 연속 {MAX_CONSECUTIVE_FAILS}회 실패 - mesh 파일 없음")
                 break
             continue
 
-        # BlenderProc 실행 (clean_env로 conda 오염 방지)
+        # Blender 직접 실행 (--python-use-system-env 없이 → conda 오염 방지)
+        worker_abs = str(worker_path.resolve())
         cmd = [
-            "blenderproc", "run",
-            str(worker_path),
+            blender_path, "--background", "--python", worker_abs,
+            "--",  # Blender args와 script args 구분
             "--job", str(job_file),
             "--output_dir", str(scene_dir),
         ]
@@ -186,13 +286,10 @@ def run_physics_settle(cfg, max_scenes=None):
                 env=clean_env,
             )
             if result.returncode != 0:
-                # stderr 마지막 줄들이 실제 에러 → 뒤에서부터 표시
                 stderr_lines = result.stderr.strip().split('\n')
-                # 마지막 5줄 (실제 에러 메시지)
                 error_tail = '\n'.join(stderr_lines[-5:]) if len(stderr_lines) > 5 else result.stderr
                 print(f"    ⚠️ {job['scene_id']} 실패:\n{error_tail}")
 
-                # 에러 로그 저장
                 log_file = scene_dir / "error.log"
                 with open(log_file, 'w') as f:
                     f.write(f"=== STDERR ===\n{result.stderr}\n\n=== STDOUT ===\n{result.stdout}")
@@ -200,23 +297,22 @@ def run_physics_settle(cfg, max_scenes=None):
                 fail_count += 1
                 consecutive_fails += 1
             else:
-                consecutive_fails = 0  # 성공 시 리셋
+                consecutive_fails = 0
 
         except subprocess.TimeoutExpired:
             print(f"    ⚠️ {job['scene_id']} 타임아웃 (300초)")
             fail_count += 1
             consecutive_fails += 1
         except FileNotFoundError:
-            print("    ⚠️ blenderproc 미설치. pip install blenderproc")
+            print(f"    ❌ Blender 실행 파일 없음: {blender_path}")
             break
 
-        # 연속 실패 임계값 체크
         if consecutive_fails >= MAX_CONSECUTIVE_FAILS:
-            print(f"\n  ❌ 연속 {MAX_CONSECUTIVE_FAILS}회 실패 - 시스템 문제 의심. 중단합니다.")
-            print(f"     에러 로그 확인: {scene_dir}/error.log")
+            print(f"\n  ❌ 연속 {MAX_CONSECUTIVE_FAILS}회 실패 - 중단")
+            print(f"     에러 로그: {scene_dir}/error.log")
             break
 
-        # 리소스 정리: 50개마다 /tmp BlenderProc 캐시 정리
+        # 50개마다 /tmp 캐시 정리
         if (idx + 1) % 50 == 0:
             import glob, shutil
             for tmp_dir in glob.glob("/tmp/blender_proc_*"):
