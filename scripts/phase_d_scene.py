@@ -11,6 +11,7 @@ Requirements:
 """
 
 import json
+import os
 import argparse
 import uuid
 from pathlib import Path
@@ -117,6 +118,20 @@ def run_physics_settle(cfg, max_scenes=None):
         print(f"  ⚠️ Worker 스크립트 없음: {worker_path}")
         return
 
+    # BlenderProc 환경 변수 정리: conda PYTHONPATH 오염 방지
+    # Blender는 자체 Python(3.11)을 사용하므로 conda의 site-packages가 섞이면 안 됨
+    clean_env = os.environ.copy()
+    conda_prefix = clean_env.get('CONDA_PREFIX', '')
+    for key in ['PYTHONPATH', 'PYTHONHOME']:
+        clean_env.pop(key, None)
+    # PATH에서 conda의 bin만 blenderproc 찾을 수 있도록 유지하되,
+    # Blender가 자체 Python을 사용하도록 나머지는 정리
+    # LD_LIBRARY_PATH에서 conda lib 제거 (numpy .so 충돌 방지)
+    if 'LD_LIBRARY_PATH' in clean_env:
+        ld_paths = clean_env['LD_LIBRARY_PATH'].split(':')
+        ld_paths = [p for p in ld_paths if 'anaconda' not in p and 'conda' not in p and 'envs' not in p]
+        clean_env['LD_LIBRARY_PATH'] = ':'.join(ld_paths) if ld_paths else ''
+
     jobs = []
     with jsonlines.open(jobs_path) as reader:
         for job in reader:
@@ -157,7 +172,7 @@ def run_physics_settle(cfg, max_scenes=None):
                 break
             continue
 
-        # BlenderProc 실행
+        # BlenderProc 실행 (clean_env로 conda 오염 방지)
         cmd = [
             "blenderproc", "run",
             str(worker_path),
@@ -167,7 +182,8 @@ def run_physics_settle(cfg, max_scenes=None):
 
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=300
+                cmd, capture_output=True, text=True, timeout=300,
+                env=clean_env,
             )
             if result.returncode != 0:
                 # stderr 마지막 줄들이 실제 에러 → 뒤에서부터 표시
