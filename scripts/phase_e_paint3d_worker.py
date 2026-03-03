@@ -146,12 +146,14 @@ def run_paint3d_cli(mesh_path, output_dir, prompt, paint3d_dir,
     if not stage2_script.exists():
         print("[Stage 2] Script not found, using Stage 1 output as final")
         _copy_results_to_output(stage1_outdir, output_dir, mesh_path)
+        Path(output_dir, ".paint3d_done").write_text("stage1_only")
         return True
 
     if not stage2_sd_config.exists():
         print(f"[Stage 2] sd_config not found: {stage2_sd_config}")
         print("  Using Stage 1 output as final")
         _copy_results_to_output(stage1_outdir, output_dir, mesh_path)
+        Path(output_dir, ".paint3d_done").write_text("stage1_only")
         return True
 
     texture_path = str(stage1_textures[0])
@@ -189,25 +191,35 @@ def run_paint3d_cli(mesh_path, output_dir, prompt, paint3d_dir,
                 print(f"  stdout: {line}", file=sys.stderr)
         print("[Stage 2] Falling back to Stage 1 output", file=sys.stderr)
         _copy_results_to_output(stage1_outdir, output_dir, mesh_path)
+        Path(output_dir, ".paint3d_done").write_text("stage1_only")
         return True
 
     print("[Stage 2] OK")
     _copy_results_to_output(stage2_outdir, output_dir, mesh_path)
+    # Paint3D 성공 마커 생성
+    Path(output_dir, ".paint3d_done").write_text("ok")
     return True
 
 
 def _copy_results_to_output(src_dir, output_dir, mesh_path):
-    """Paint3D 출력 결과를 표준 파일명으로 정리"""
+    """Paint3D 출력 결과를 표준 파일명으로 정리
+
+    최종 구조:
+      output_dir/
+        albedo.png          ← Paint3D 텍스처 (가장 큰 PNG)
+        textured_mesh.obj   ← 메쉬 (mtllib paint3d.mtl 참조)
+        paint3d.mtl         ← albedo.png를 참조하는 material
+    """
     src_path = Path(src_dir)
     out_path = Path(output_dir)
 
-    # texture 파일 → albedo.png (가장 큰 파일)
+    # --- 1) texture 파일 → albedo.png (가장 큰 파일) ---
     texture_files = sorted(
         list(src_path.rglob("*.png")) + list(src_path.rglob("*.jpg")),
         key=lambda f: f.stat().st_size,
         reverse=True,
     )
-    # stage1/ 하위 파일은 제외 (이미 처리된 것)
+    # 이미 복사된 albedo.png는 제외
     texture_files = [f for f in texture_files if f.name != "albedo.png"]
 
     if texture_files and not (out_path / "albedo.png").exists():
@@ -215,7 +227,7 @@ def _copy_results_to_output(src_dir, output_dir, mesh_path):
         shutil.copy2(str(best), str(out_path / "albedo.png"))
         print(f"  albedo.png <- {best.name} ({best.stat().st_size // 1024}KB)")
 
-    # textured_mesh.obj
+    # --- 2) textured_mesh.obj ---
     textured = out_path / "textured_mesh.obj"
     if not textured.exists():
         # Paint3D가 생성한 .obj 탐색
@@ -228,16 +240,84 @@ def _copy_results_to_output(src_dir, output_dir, mesh_path):
             except Exception:
                 pass
 
-    # .mtl 파일
-    for mtl in src_path.rglob("*.mtl"):
-        dst_mtl = out_path / mtl.name
-        if not dst_mtl.exists():
-            shutil.copy2(str(mtl), str(dst_mtl))
+    # --- 3) paint3d.mtl 생성 (albedo.png를 Base Color로 참조) ---
+    if (out_path / "albedo.png").exists():
+        _write_mtl_for_albedo(out_path)
+        _patch_obj_mtllib(textured, "paint3d.mtl")
+
+
+def _write_mtl_for_albedo(out_path):
+    """albedo.png를 참조하는 .mtl 파일 생성"""
+    mtl_path = out_path / "paint3d.mtl"
+    mtl_content = """# Paint3D generated material
+newmtl paint3d_material
+Ka 1.000 1.000 1.000
+Kd 1.000 1.000 1.000
+Ks 0.000 0.000 0.000
+Ns 10.0
+d 1.0
+illum 1
+map_Kd albedo.png
+"""
+    mtl_path.write_text(mtl_content)
+    print(f"  paint3d.mtl 생성 (map_Kd -> albedo.png)")
+
+
+def _patch_obj_mtllib(obj_path, mtl_name):
+    """OBJ 파일의 mtllib 참조를 강제 교체하고 usemtl 확인
+
+    BlenderProc의 load_obj()가 .mtl을 자동으로 읽으려면
+    OBJ 파일에 'mtllib xxx.mtl'과 'usemtl yyy' 지시어가 있어야 함.
+    """
+    obj_path = Path(obj_path)
+    if not obj_path.exists():
+        return
+
+    try:
+        lines = obj_path.read_text().splitlines()
+    except Exception:
+        return
+
+    new_lines = []
+    has_mtllib = False
+    has_usemtl = False
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("mtllib "):
+            # 기존 mtllib을 교체
+            new_lines.append(f"mtllib {mtl_name}")
+            has_mtllib = True
+        elif stripped.startswith("usemtl "):
+            # 기존 usemtl을 paint3d material로 교체
+            new_lines.append("usemtl paint3d_material")
+            has_usemtl = True
+        else:
+            new_lines.append(line)
+
+    # mtllib이 없었으면 파일 맨 앞에 삽입
+    if not has_mtllib:
+        new_lines.insert(0, f"mtllib {mtl_name}")
+
+    # usemtl이 없었으면 첫 번째 'f ' (face) 앞에 삽입
+    if not has_usemtl:
+        for i, line in enumerate(new_lines):
+            if line.strip().startswith("f "):
+                new_lines.insert(i, "usemtl paint3d_material")
+                break
+
+    obj_path.write_text("\n".join(new_lines) + "\n")
+    print(f"  textured_mesh.obj 패치: mtllib={mtl_name}, usemtl=paint3d_material")
 
 
 def generate_texture_fallback(mesh_path, output_dir):
-    """Fallback: MLLM이 형상을 인식할 수 있도록 단색 텍스처 생성"""
+    """Fallback: MLLM이 형상을 인식할 수 있도록 단색 텍스처 생성
+
+    단색 albedo.png + paint3d.mtl + textured_mesh.obj 를 생성하여
+    BlenderProc load_obj()가 자동으로 텍스처를 읽을 수 있게 함.
+    """
     os.makedirs(output_dir, exist_ok=True)
+    out_path = Path(output_dir)
 
     print("  Fallback: 단색 텍스처 생성")
     rng = np.random.RandomState(hash(str(mesh_path)) % 2**31)
@@ -261,12 +341,18 @@ def generate_texture_fallback(mesh_path, output_dir):
         png_path = os.path.join(output_dir, "albedo.png")
         shutil.move(albedo_path, png_path)
 
+    # textured_mesh.obj 복사
     textured_path = os.path.join(output_dir, "textured_mesh.obj")
     if not os.path.exists(textured_path):
         try:
             shutil.copy2(str(mesh_path), textured_path)
         except Exception:
             pass
+
+    # .mtl 생성 + .obj에 mtllib 패치 (load_obj가 자동으로 텍스처 읽도록)
+    if (out_path / "albedo.png").exists():
+        _write_mtl_for_albedo(out_path)
+        _patch_obj_mtllib(Path(textured_path), "paint3d.mtl")
 
     return True
 

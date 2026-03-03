@@ -109,6 +109,9 @@ run_phase() {
 }
 
 # 실행
+# 참고: Phase D(Scene 구성)와 E(Paint3D 텍스처)는 서로 독립적이며 병렬 실행 가능합니다.
+# 순차 실행에서는 D → E 순서로 실행하지만, 둘 다 Phase C 이후에 독립적으로 시작할 수 있습니다.
+# Phase F(렌더링)가 D와 E의 결과를 모두 사용하므로, F 시작 전에 D와 E가 모두 완료되어야 합니다.
 if [ "$PHASE" = "all" ]; then
     for p in a b c d e f g h i; do
         run_phase $p

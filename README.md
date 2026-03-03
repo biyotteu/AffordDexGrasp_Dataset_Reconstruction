@@ -13,10 +13,11 @@ Phase B: 표준 메타 변환 (28D grasp → t/r/q 분해)
    ↓
 Phase C: Open-set Split 생성 (seen/unseen 카테고리)
    ↓
-Phase D: BlenderProc Scene 구성 (tabletop + physics settle)
-   ↓
-Phase E: Paint3D 텍스처 적용
-   ↓
+Phase D: BlenderProc Scene 구성          Phase E: Paint3D 텍스처 적용
+   (tabletop + physics settle)              (UV unwrap + diffusion)
+   ↓                                        ↓
+   └──────────────┬─────────────────────────┘
+                  ↓
 Phase F: 5-view RGB-D 렌더링 + 포인트 클라우드 생성
    ↓
 Phase G: MLLM Semantic 추출 (Qwen3-VL-32B)
@@ -25,6 +26,8 @@ Phase H: GT Affordance 생성 (ShadowHand FK + 논문 공식)
    ↓
 Phase I: 최종 패키징 + QC
 ```
+
+**참고**: Phase D(Scene 구성)와 Phase E(텍스처)는 서로 독립적이며 **병렬 실행 가능**합니다. 둘 다 Phase C 이후에 실행 가능하고, Phase F가 두 Phase의 결과를 합쳐 렌더링합니다.
 
 ## 사용 환경
 
@@ -106,22 +109,24 @@ AffordDexGraspData/
 │   ├── phase_a_download.py       # 데이터 다운로드
 │   ├── phase_b_meta.py           # 메타 변환
 │   ├── phase_c_splits.py         # Open-set split
-│   ├── phase_d_scene.py          # Scene 구성
-│   ├── phase_d_blenderproc_worker.py
-│   ├── phase_e_paint3d.py        # Paint3D 텍스처
-│   ├── phase_e_paint3d_worker.py
-│   ├── phase_f_render.py         # RGB-D 렌더링
-│   ├── phase_f_render_worker.py
+│   ├── phase_d_scene.py          # Scene 구성 (Blender 직접 실행)
+│   ├── phase_d_blenderproc_worker.py  # BlenderProc Scene worker
+│   ├── phase_e_paint3d.py        # Paint3D 텍스처 (conda 분리)
+│   ├── phase_e_paint3d_worker.py  # Paint3D worker (paint3d 환경)
+│   ├── phase_e_uv_unwrap_worker.py  # UV unwrap worker (xatlas)
+│   ├── phase_f_render.py         # RGB-D 렌더링 (Blender 직접 실행)
+│   ├── phase_f_render_worker.py  # BlenderProc Render worker
 │   ├── phase_g_mllm.py           # MLLM semantic 추출
 │   ├── phase_h_affordance.py     # GT Affordance 생성
 │   ├── phase_i_package.py        # 최종 패키징
+│   ├── pipeline_utils.py         # 공용 유틸리티
 │   ├── debug_coords.py           # 좌표계 디버깅
-│   └── visualize_affordance.py   # Affordance 시각화
+│   ├── visualize_affordance.py   # Affordance 시각화
+│   └── visualize_object.py       # 3D 메쉬/텍스처 시각화
 ├── docs/
 │   ├── SETUP_AND_RUN.md          # 상세 설정/실행 가이드
 │   ├── PAPER_IMPLEMENTATION.md   # 논문 vs 구현 매핑 (수식, 설정값, 차이점)
-│   ├── DESIGN_DECISIONS.md       # 논문 미공개 부분 자체 설계 결정 사항
-│   └── PIPELINE_VERIFICATION.md  # 파이프라인 검증 보고서
+│   └── DESIGN_DECISIONS.md       # 논문 미공개 부분 자체 설계 결정 사항
 ├── run_pipeline.sh               # 실행 스크립트 (Linux)
 ├── run_pipeline.bat              # 실행 스크립트 (Windows)
 └── requirements.txt

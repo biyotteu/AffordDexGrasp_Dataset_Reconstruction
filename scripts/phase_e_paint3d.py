@@ -269,9 +269,9 @@ def _install_missing_deps(conda_exe, env_name, missing, clone_dir):
 
     # environment.yaml의 pip 의존성 전체 설치가 가장 확실
     env_yaml = Path(clone_dir) / "environment.yaml"
+    yaml_installed = False
     if env_yaml.exists():
         print(f"    environment.yaml에서 pip 의존성 설치...")
-        # environment.yaml에서 pip deps만 추출하여 설치
         try:
             with open(env_yaml) as f:
                 env_data = yaml.safe_load(f)
@@ -289,26 +289,40 @@ def _install_missing_deps(conda_exe, env_name, missing, clone_dir):
                 )
                 if result.returncode == 0:
                     print(f"    ✅ pip 의존성 {len(pip_deps)}개 설치 완료")
-                    return
+                    yaml_installed = True
                 else:
                     print(f"    ⚠️ 일부 설치 실패, 개별 설치 시도...")
         except Exception as e:
             print(f"    ⚠️ environment.yaml 파싱 실패: {e}")
 
-    # 폴백: 핵심 패키지만 개별 설치
-    for pkg in PAINT3D_PIP_DEPS:
-        pkg_name = pkg.split('==')[0]
-        if pkg_name in missing or pkg_name in ['diffusers', 'accelerate', 'transformers']:
-            print(f"    설치: {pkg}")
-            result = subprocess.run(
-                [conda_exe, "run", "-n", env_name, "pip", "install", pkg],
-                capture_output=True, text=True, timeout=120,
-            )
-            if result.returncode == 0:
-                print(f"    ✅ {pkg}")
-            else:
-                err = result.stderr.strip().split('\n')[-1] if result.stderr else "unknown"
-                print(f"    ❌ {pkg}: {err}")
+    if not yaml_installed:
+        # 폴백: 핵심 패키지만 개별 설치
+        for pkg in PAINT3D_PIP_DEPS:
+            pkg_name = pkg.split('==')[0].split('<')[0].split('>')[0]
+            if pkg_name in missing or pkg_name in ['diffusers', 'accelerate', 'transformers', 'huggingface_hub']:
+                print(f"    설치: {pkg}")
+                result = subprocess.run(
+                    [conda_exe, "run", "-n", env_name, "pip", "install", pkg],
+                    capture_output=True, text=True, timeout=120,
+                )
+                if result.returncode == 0:
+                    print(f"    ✅ {pkg}")
+                else:
+                    err = result.stderr.strip().split('\n')[-1] if result.stderr else "unknown"
+                    print(f"    ❌ {pkg}: {err}")
+
+    # 항상 huggingface_hub 버전 핀 적용 (yaml 설치가 최신 버전을 넣을 수 있으므로)
+    print(f"    huggingface_hub<0.24.0 핀 적용 중...")
+    result = subprocess.run(
+        [conda_exe, "run", "-n", env_name,
+         "pip", "install", "huggingface_hub<0.24.0"],
+        capture_output=True, text=True, timeout=120,
+    )
+    if result.returncode == 0:
+        print(f"    ✅ huggingface_hub 다운그레이드 완료")
+    else:
+        err = result.stderr.strip().split('\n')[-1] if result.stderr else "unknown"
+        print(f"    ⚠️ huggingface_hub 다운그레이드 실패: {err}")
 
 
 # ============================================================
@@ -445,8 +459,13 @@ def _build_paint3d_cmd(python_path, conda_exe, env_name, worker_path, args_list)
 
 
 def _run_fallback_texture(mesh_path, output_dir):
-    """Paint3D 없이 fallback 텍스처 생성 (메인 환경에서 실행)"""
+    """Paint3D 없이 fallback 텍스처 생성 (메인 환경에서 실행)
+
+    albedo.png + paint3d.mtl + textured_mesh.obj 를 생성하여
+    BlenderProc load_obj()가 자동으로 텍스처를 읽을 수 있게 함.
+    """
     os.makedirs(output_dir, exist_ok=True)
+    out_path = Path(output_dir)
 
     rng = np.random.RandomState(hash(str(mesh_path)) % 2**31)
     color = rng.randint(100, 230, 3).tolist()
@@ -466,6 +485,47 @@ def _run_fallback_texture(mesh_path, output_dir):
             shutil.copy2(str(mesh_path), textured_path)
         except Exception:
             pass
+
+    # .mtl 생성 + .obj에 mtllib 패치 (BlenderProc이 텍스처를 자동 로드하도록)
+    albedo_file = out_path / "albedo.png"
+    if albedo_file.exists():
+        mtl_content = ("# Fallback material\n"
+                       "newmtl paint3d_material\n"
+                       "Ka 1.000 1.000 1.000\n"
+                       "Kd 1.000 1.000 1.000\n"
+                       "Ks 0.000 0.000 0.000\n"
+                       "Ns 10.0\nd 1.0\nillum 1\n"
+                       "map_Kd albedo.png\n")
+        (out_path / "paint3d.mtl").write_text(mtl_content)
+
+        # textured_mesh.obj에 mtllib 패치
+        obj_file = Path(textured_path)
+        if obj_file.exists():
+            try:
+                lines = obj_file.read_text().splitlines()
+                new_lines = []
+                has_mtllib = False
+                has_usemtl = False
+                for line in lines:
+                    s = line.strip()
+                    if s.startswith("mtllib "):
+                        new_lines.append("mtllib paint3d.mtl")
+                        has_mtllib = True
+                    elif s.startswith("usemtl "):
+                        new_lines.append("usemtl paint3d_material")
+                        has_usemtl = True
+                    else:
+                        new_lines.append(line)
+                if not has_mtllib:
+                    new_lines.insert(0, "mtllib paint3d.mtl")
+                if not has_usemtl:
+                    for i, line in enumerate(new_lines):
+                        if line.strip().startswith("f "):
+                            new_lines.insert(i, "usemtl paint3d_material")
+                            break
+                obj_file.write_text("\n".join(new_lines) + "\n")
+            except Exception:
+                pass
 
 
 def run_paint3d(cfg, max_objects=None, paint3d_python=None, paint3d_dir=None, force=False):
@@ -543,12 +603,11 @@ def run_paint3d(cfg, max_objects=None, paint3d_python=None, paint3d_dir=None, fo
             stats["skipped"] += 1
             continue
         if force and _has_valid_texture(obj_tex_dir, min_texture_size):
-            # force 모드: Paint3D 진짜 텍스처(material_*.png)가 있으면 스킵, fallback만 있으면 재실행
-            has_real_texture = bool(list(obj_tex_dir.glob("material_*.png")))
-            if has_real_texture:
+            # force 모드: .paint3d_done 마커가 있으면 진짜 Paint3D 성공 → 스킵
+            if (obj_tex_dir / PAINT3D_DONE_MARKER).exists():
                 stats["skipped"] += 1
                 continue
-            # fallback 결과 제거 후 재실행
+            # 마커 없음 = fallback 단색이거나 원본 material → 재실행
             for f in ["albedo.png", "textured_mesh.obj"]:
                 fp = obj_tex_dir / f
                 if fp.exists():
@@ -582,8 +641,8 @@ def run_paint3d(cfg, max_objects=None, paint3d_python=None, paint3d_dir=None, fo
                     cmd, capture_output=True, text=True, timeout=timeout,
                 )
                 if result.returncode == 0:
-                    # 실제 Paint3D 결과가 있는지 확인 (fallback이 아닌 진짜 텍스처)
-                    if list(obj_tex_dir.glob("material_*.png")):
+                    # .paint3d_done 마커 or albedo.png → Paint3D 성공
+                    if (obj_tex_dir / PAINT3D_DONE_MARKER).exists():
                         stats["success"] += 1
                     elif (obj_tex_dir / "albedo.png").exists():
                         stats["success"] += 1
@@ -632,24 +691,21 @@ def run_paint3d(cfg, max_objects=None, paint3d_python=None, paint3d_dir=None, fo
     check_texture_quality(cfg)
 
 
-def _has_valid_texture(obj_tex_dir, min_texture_size):
-    """해당 오브젝트에 유효한 텍스처가 있는지 확인"""
-    # Paint3D 원본 결과 (material_*.png)
-    mat_files = list(obj_tex_dir.glob("material_*.png"))
-    if mat_files:
-        try:
-            from PIL import Image
-            for mf in mat_files:
-                img = Image.open(str(mf))
-                if img.size[0] >= min_texture_size and img.size[1] >= min_texture_size:
-                    return True
-        except Exception:
-            pass
+PAINT3D_DONE_MARKER = ".paint3d_done"  # Paint3D 완료 마커 파일
 
-    # Fallback 결과 (albedo.png + textured_mesh.obj)
+
+def _has_valid_texture(obj_tex_dir, min_texture_size):
+    """해당 오브젝트에 Paint3D가 생성한 유효한 텍스처가 있는지 확인"""
+    # Paint3D 완료 마커가 있으면 확실히 완료된 것
+    if (obj_tex_dir / PAINT3D_DONE_MARKER).exists():
+        return True
+
+    # Fallback 결과 (albedo.png + textured_mesh.obj) — fallback도 "처리 완료"로 간주
     if (obj_tex_dir / "textured_mesh.obj").exists() and (obj_tex_dir / "albedo.png").exists():
         return True
 
+    # 주의: material_*.png는 원본 메쉬 자체 텍스처일 수 있으므로
+    # Paint3D 결과 판정에 사용하지 않음 (마커 파일로만 판단)
     return False
 
 
@@ -658,26 +714,41 @@ def check_texture_quality(cfg):
     textures_dir = Path(cfg['paths']['textures'])
 
     total = 0
+    paint3d_done = 0       # .paint3d_done 마커 있음 (진짜 Paint3D 성공)
     has_albedo = 0
     has_textured_mesh = 0
-    has_paint3d_material = 0
+    has_original_material = 0  # 원본 메쉬 material (Paint3D가 아님)
+    fallback_only = 0      # albedo.png만 있고 마커 없음 (단색 fallback)
 
     for obj_dir in textures_dir.iterdir():
         if not obj_dir.is_dir():
             continue
         total += 1
-        if (obj_dir / "albedo.png").exists():
+
+        marker = obj_dir / PAINT3D_DONE_MARKER
+        albedo = obj_dir / "albedo.png"
+        textured = obj_dir / "textured_mesh.obj"
+        mat_files = list(obj_dir.glob("material_*.png"))
+
+        if marker.exists():
+            paint3d_done += 1
+        if albedo.exists():
             has_albedo += 1
-        if (obj_dir / "textured_mesh.obj").exists():
+        if textured.exists():
             has_textured_mesh += 1
-        if list(obj_dir.glob("material_*.png")):
-            has_paint3d_material += 1
+        if mat_files and not marker.exists():
+            has_original_material += 1  # 원본 메쉬에 포함된 material
+        if albedo.exists() and not marker.exists():
+            fallback_only += 1
 
     print(f"\n  [텍스처 품질 체크]")
     print(f"    총 오브젝트: {total}")
-    print(f"    Paint3D 텍스처: {has_paint3d_material} ({has_paint3d_material/max(total,1)*100:.1f}%)")
-    print(f"    albedo (Paint3D+fallback): {has_albedo} ({has_albedo/max(total,1)*100:.1f}%)")
+    print(f"    Paint3D 성공 (마커): {paint3d_done} ({paint3d_done/max(total,1)*100:.1f}%)")
+    print(f"    Fallback 단색: {fallback_only} ({fallback_only/max(total,1)*100:.1f}%)")
+    print(f"    원본 material 보유: {has_original_material}")
+    print(f"    albedo 보유: {has_albedo}")
     print(f"    textured mesh: {has_textured_mesh}")
+    print(f"    미처리: {total - paint3d_done - fallback_only}")
 
 
 # ============================================================

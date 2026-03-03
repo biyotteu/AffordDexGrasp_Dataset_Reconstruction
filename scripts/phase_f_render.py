@@ -7,8 +7,9 @@ Phase F: 5-view RGB-D 렌더링 + Global Point Cloud 생성
 """
 
 import json
+import os
 import argparse
-import math
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -22,32 +23,73 @@ def load_config(config_path="configs/pipeline_config.yaml"):
 
 
 # ============================================================
-# F1 + F2: BlenderProc 기반 5-view RGB-D 렌더링
+# blenderproc 버전 확인 + 자동 다운그레이드
 # ============================================================
+BPROC_TARGET_VERSION = "2.7.0"  # → Blender 3.5.1 → Python 3.10 (conda와 일치)
 RENDER_WORKER_SCRIPT = Path("scripts") / "phase_f_render_worker.py"
 
 
+def _ensure_blenderproc():
+    """blenderproc 2.7.0이 설치되어 있는지 확인하고, 아니면 자동 설치/다운그레이드"""
+    try:
+        result = subprocess.run(
+            ["python", "-c",
+             "import blenderproc; print(blenderproc.__version__)"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            installed_ver = result.stdout.strip()
+            if installed_ver == BPROC_TARGET_VERSION:
+                print(f"  blenderproc {installed_ver} OK")
+                return True
+            else:
+                print(f"  blenderproc {installed_ver} → {BPROC_TARGET_VERSION} 다운그레이드 중...")
+        else:
+            print(f"  blenderproc 미설치, {BPROC_TARGET_VERSION} 설치 중...")
+    except FileNotFoundError:
+        print(f"  blenderproc 미설치, {BPROC_TARGET_VERSION} 설치 중...")
+
+    r = subprocess.run(
+        ["pip", "install", f"blenderproc=={BPROC_TARGET_VERSION}"],
+        capture_output=True, text=True, timeout=300,
+    )
+    if r.returncode != 0:
+        print(f"  ❌ blenderproc 설치 실패: {r.stderr[-500:]}")
+        return False
+
+    print(f"  blenderproc {BPROC_TARGET_VERSION} 설치 완료")
+    return True
+
+
+# ============================================================
+# F1 + F2: BlenderProc 기반 5-view RGB-D 렌더링
+# ============================================================
 def run_rendering(cfg, max_scenes=None):
-    """모든 scene 렌더링"""
+    """모든 scene 렌더링 (blenderproc run - 옛날 방식 그대로)"""
     print("=" * 60)
     print("[F1+F2] 5-view RGB-D 렌더링")
     print("=" * 60)
-
-    import subprocess
 
     worker_path = RENDER_WORKER_SCRIPT
     if not worker_path.exists():
         print(f"  ⚠️ Render worker 스크립트 없음: {worker_path}")
         return
 
+    # blenderproc 2.7.0 확인/설치
+    if not _ensure_blenderproc():
+        print("  ❌ blenderproc 준비 실패")
+        return
+
     scenes_dir = Path(cfg['paths']['scenes'])
     renders_dir = Path(cfg['paths']['renders'])
     renders_dir.mkdir(parents=True, exist_ok=True)
+    textures_dir = str(Path(cfg['paths']['textures']).resolve())
 
     scene_dirs = [d for d in scenes_dir.iterdir() if d.is_dir() and (d / "job.json").exists()]
     if max_scenes:
         scene_dirs = scene_dirs[:max_scenes]
 
+    fail_count = 0
     for scene_dir in tqdm(scene_dirs, desc="  렌더링"):
         scene_id = scene_dir.name
         output = renders_dir / scene_id
@@ -55,37 +97,55 @@ def run_rendering(cfg, max_scenes=None):
         if output.exists() and (output / "rgb_cam0.png").exists():
             continue  # 이미 렌더링됨
 
+        # 옛날 방식 그대로: blenderproc run (Blender 3.5.1 자동 다운로드)
+        worker_abs = str(worker_path.resolve())
         cmd = [
             "blenderproc", "run",
-            str(worker_path),
+            worker_abs,
             "--scene_dir", str(scene_dir),
             "--renders_dir", str(renders_dir),
+            "--textures_dir", textures_dir,
         ]
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-            if result.returncode != 0:
-                # stderr에서 실제 에러만 추출 (Traceback 또는 Error 포함 라인)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=600,
+            )
+
+            # 렌더링 결과 파일 존재 여부로 실제 성공 판단
+            rgb0 = output / "rgb_cam0.png"
+            render_actually_succeeded = rgb0.exists()
+
+            if result.returncode != 0 or not render_actually_succeeded:
                 stderr_lines = result.stderr.strip().split('\n') if result.stderr else []
-                # Traceback 찾기
                 tb_start = -1
                 for li, line in enumerate(stderr_lines):
-                    if 'Traceback' in line:
+                    if 'Traceback' in line or 'Error' in line:
                         tb_start = li
                 if tb_start >= 0:
                     err_msg = '\n'.join(stderr_lines[tb_start:])
                 else:
                     err_msg = '\n'.join(stderr_lines[-10:])
-                print(f"    ⚠️ {scene_id} 렌더링 실패:")
-                print(f"       {err_msg[:500]}")
 
-                # 실패 로그 저장
+                reason = "returncode=" + str(result.returncode)
+                if not render_actually_succeeded:
+                    reason += ", rgb_cam0.png 없음"
+                tqdm.write(f"    ⚠️ {scene_id} 렌더링 실패 ({reason}):")
+                tqdm.write(f"       {err_msg[:500]}")
+
                 log_dir = Path("logs/render_failures")
                 log_dir.mkdir(parents=True, exist_ok=True)
                 with open(log_dir / f"{scene_id}.log", 'w') as lf:
                     lf.write(f"=== STDOUT ===\n{result.stdout}\n\n=== STDERR ===\n{result.stderr}")
+                fail_count += 1
+        except subprocess.TimeoutExpired:
+            tqdm.write(f"    ⚠️ {scene_id} 타임아웃 (600s)")
+            fail_count += 1
         except Exception as e:
-            print(f"    ⚠️ {scene_id} 에러: {e}")
+            tqdm.write(f"    ⚠️ {scene_id} 에러: {e}")
+            fail_count += 1
+
+    print(f"\n  렌더링 실패: {fail_count}개 / 전체: {len(scene_dirs)}개")
 
 
 # ============================================================

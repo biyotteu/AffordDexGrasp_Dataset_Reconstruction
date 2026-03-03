@@ -1,6 +1,7 @@
-import blenderproc as bproc  # 반드시 첫 줄이어야 함 (BlenderProc 요구사항)
 # Phase D BlenderProc Worker: Tabletop scene 생성 + Physics settle
-# 실행: blenderproc run phase_d_blenderproc_worker.py --job <job.json> --output_dir <dir>
+# 실행: blenderproc run worker.py --job <job.json> --output_dir <dir>
+# blenderproc 2.7.0 → Blender 3.5.1 → Python 3.10 (conda와 일치)
+import blenderproc as bproc
 import sys
 import os
 import json
@@ -33,8 +34,12 @@ def create_tabletop_scene(job, output_dir):
     try:
         objs = bproc.loader.load_obj(mesh_path)
     except:
-        # PLY 파일인 경우
-        objs = bproc.loader.load_ply(mesh_path)
+        # PLY 파일인 경우 — blenderproc에 load_ply가 없으므로 bpy 직접 로드
+        import bpy as _bpy
+        _bpy.ops.import_mesh.ply(filepath=mesh_path)
+        imported = _bpy.context.selected_objects[0]
+        from blenderproc.python.types.MeshObjectUtility import MeshObject
+        objs = [MeshObject(imported)]
 
     target_obj = objs[0] if isinstance(objs, list) else objs
     target_obj.set_name("object_" + str(job['obj_id']))
@@ -91,7 +96,7 @@ def create_tabletop_scene(job, output_dir):
 
         cam_pos = [cam_x, cam_y, cam_z]
         rotation_matrix = bproc.camera.rotation_from_forward_vec(
-            obj_center - np.array(cam_pos)
+            obj_center - np.array(cam_pos), up_axis='Z'
         )
         cam2world = bproc.math.build_transformation_mat(cam_pos, rotation_matrix)
         bproc.camera.add_camera_pose(cam2world)
@@ -100,7 +105,7 @@ def create_tabletop_scene(job, output_dir):
     topdown_height = cam_cfg["topdown_height"]
     cam_pos = [obj_center[0], obj_center[1], obj_center[2] + topdown_height]
     rotation_matrix = bproc.camera.rotation_from_forward_vec(
-        obj_center - np.array(cam_pos)
+        obj_center - np.array(cam_pos), up_axis='Z'
     )
     cam2world = bproc.math.build_transformation_mat(cam_pos, rotation_matrix)
     bproc.camera.add_camera_pose(cam2world)

@@ -378,6 +378,150 @@ Paint3D는 text-to-texture diffusion 모델. 프롬프트가 구체적일수록 
 
 ---
 
+## 10. Phase D/F — Blender 직접 실행 (blenderproc run 우회)
+
+**파일**: `scripts/phase_d_scene.py`, `scripts/phase_f_render.py`
+
+논문에 언급 없음. BlenderProc CLI(`blenderproc run worker.py`)를 사용하면 conda 환경의 numpy가 Blender 내장 Python 3.11 환경에 주입되어 버전 충돌(`numpy.dtype size changed`)이 발생하는 문제를 해결.
+
+### 문제
+
+`blenderproc run`은 내부적으로 Blender를 실행할 때 현재 Python 환경의 `site-packages`를 Blender의 `PYTHONPATH`에 추가합니다. conda 환경에 numpy 2.x가 설치되어 있으면 Blender 내장 numpy 1.x와 충돌하여 런타임 에러 발생.
+
+### 해결 방식
+
+```
+기존: blenderproc run phase_d_blenderproc_worker.py --args
+변경: blender --background --python phase_d_blenderproc_worker.py -- --args
+```
+
+1. `_find_blender(cfg)`: blenderproc이 설치한 Blender 바이너리 경로를 탐색 (`blenderproc path` → `resources/blender/blender`)
+2. `_ensure_blenderproc_in_blender(blender_python)`: Blender 내장 Python에 blenderproc 패키지 설치 확인
+3. `clean_env`: `PYTHONPATH`, `PYTHONHOME`, `CONDA_PREFIX`, `CONDA_DEFAULT_ENV`, `CONDA_PYTHON_EXE` 제거 + `LD_LIBRARY_PATH`에서 conda 경로 제거
+4. `--` argv separator: Blender 자체 인자와 스크립트 인자를 분리. Worker에서 `sys.argv[sys.argv.index("--") + 1:]`으로 파싱
+
+### Worker import 제약
+
+BlenderProc은 worker 스크립트의 **첫 줄**에 `import blenderproc as bproc`이 있어야 합니다. Docstring이나 다른 import가 먼저 오면 `RuntimeError`가 발생합니다:
+
+```python
+import blenderproc as bproc  # 반드시 첫 줄
+# 이 위에 docstring이나 다른 코드가 올 수 없음
+import sys
+import json
+...
+```
+
+---
+
+## 11. Phase E/F — OBJ-MTL 텍스처 연결 체인
+
+**파일**: `scripts/phase_e_paint3d_worker.py`, `scripts/phase_e_paint3d.py`, `scripts/phase_f_render_worker.py`
+
+논문에 언급 없음. Paint3D가 생성하는 `albedo.png`를 BlenderProc이 자동으로 로드하도록 OBJ-MTL 연결 체인을 구축.
+
+### Paint3D 출력 구조
+
+```
+textures/{obj_id}/
+├── albedo.png            # UV-mapped 텍스처 아틀라스
+├── textured_mesh.obj     # UV 좌표 포함 메쉬
+├── paint3d.mtl           # 자동 생성된 material 파일
+├── .paint3d_done         # Paint3D 성공 마커
+├── material_0.png        # (있을 수 있음) Paint3D 내부 중간 결과
+├── material.mtl          # (있을 수 있음) Paint3D 내부 생성
+└── uv_mesh.obj           # UV unwrap된 원본 메쉬
+```
+
+### MTL 생성 + OBJ 패치
+
+Paint3D가 albedo.png를 생성한 뒤, worker가 자동으로:
+
+1. `paint3d.mtl` 생성:
+```
+newmtl paint3d_material
+Ka 1.000 1.000 1.000
+Kd 1.000 1.000 1.000
+Ks 0.000 0.000 0.000
+Ns 10.0
+d 1.0
+illum 1
+map_Kd albedo.png
+```
+
+2. `textured_mesh.obj`에 `mtllib paint3d.mtl` 및 `usemtl paint3d_material` 삽입/패치
+
+이 체인이 있어야 BlenderProc의 `load_obj()`가 .obj → .mtl → albedo.png 순서로 자동 텍스처 로딩을 수행합니다.
+
+### Fallback 텍스처도 동일 체인 적용
+
+단색 fallback 텍스처(Paint3D 실패 시)에도 동일한 .mtl 생성 + .obj 패치가 적용되어 BlenderProc에서 일관된 텍스처 로딩이 가능합니다.
+
+---
+
+## 12. Phase F — 3단계 텍스처 Fallback 체인
+
+**파일**: `scripts/phase_f_render_worker.py`
+
+논문에 언급 없음. BlenderProc 렌더링에서 텍스처 로딩 실패에 대비한 3단계 fallback:
+
+| 우선순위 | 방식 | 설명 |
+|---------|------|------|
+| 1 | MTL 자동 로드 | `load_obj()` → .mtl의 `map_Kd` 자동 인식. Paint3D chain 정상 시 이 방식 사용 |
+| 2 | `assign_texture_from_image()` | Blender Principled BSDF 노드에 직접 Image Texture 연결. .mtl 누락/파싱 실패 시 |
+| 3 | 랜덤 단색 | `hash(obj_id)` 기반 일관된 RGB 색상 할당 |
+
+`assign_texture_from_image()` 함수는 Blender의 Material/Node 시스템을 직접 조작합니다:
+```
+Material → Principled BSDF → Base Color ← Image Texture (albedo.png)
+```
+
+### 텍스처 소스 우선순위
+
+Phase F는 텍스처 메쉬를 다음 순서로 탐색합니다:
+1. `textures/{obj_id}/textured_mesh.obj` (Paint3D 출력)
+2. `textures/{obj_id}/uv_mesh.obj` (UV unwrap만 된 메쉬)
+3. 원본 `data/objects/{category}/{obj_id}/align_ds/mesh.obj`
+
+### render_info.json
+
+각 렌더링 결과 디렉토리에 메타데이터를 저장합니다:
+```json
+{
+  "obj_id": "bottle_001",
+  "mesh_source": "paint3d_textured",
+  "texture_source": "mtl_auto",
+  "auto_distance": 1.85,
+  "num_cameras": 5
+}
+```
+
+---
+
+## 13. Phase E — .paint3d_done 마커 시스템
+
+**파일**: `scripts/phase_e_paint3d.py`, `scripts/phase_e_paint3d_worker.py`
+
+논문에 언급 없음. Paint3D가 성공적으로 텍스처를 생성했는지 구별하기 위한 마커 파일 시스템.
+
+### 문제
+
+Paint3D 출력 디렉토리에 `material_0.png`, `material.mtl` 등이 있어도 이것이 Paint3D 자체 생성물인지 원본 메쉬에 포함된 파일인지 구분 불가. Fallback 단색 텍스처도 동일한 파일명(`albedo.png`)을 사용하므로 성공/실패 판별 불가.
+
+### 해결 방식
+
+`.paint3d_done` 파일을 성공 마커로 사용:
+
+| 마커 내용 | 의미 |
+|----------|------|
+| `"success"` | Stage 1 + Stage 2 모두 성공 |
+| `"stage1_only"` | Stage 2 없이 Stage 1만 완료 |
+| `"fallback:{color}"` | Paint3D 실패, 단색 대체 (색상 정보 포함) |
+
+force 재실행 시 `.paint3d_done` 존재 여부로 이전 Paint3D 결과를 판별하고, `material_*.png` 존재만으로는 성공 판정하지 않습니다.
+
+---
+
 ## 요약
 
 | 항목 | Phase | 논문 공개 여부 | 자체 설계 내용 |
@@ -393,3 +537,6 @@ Paint3D는 text-to-texture diffusion 모델. 프롬프트가 구체적일수록 
 | Paint3D conda 환경 분리 | E | ❌ 없음 | 별도 conda 환경 자동 감지/생성 + subprocess 호출 |
 | Paint3D Fallback | E | ❌ 없음 | 단색 텍스처 자동 생성 |
 | Paint3D 텍스처 프롬프트 | E | ❌ 미공개 | `"a realistic {obj_name}, photorealistic texture, detailed surface"` |
+| Blender 직접 실행 | D/F | ❌ 없음 | `blenderproc run` 우회로 numpy 충돌 방지 |
+| OBJ-MTL 텍스처 체인 | E/F | ❌ 없음 | paint3d.mtl 자동 생성 + OBJ 패치 + 3단계 fallback |
+| .paint3d_done 마커 | E | ❌ 없음 | Paint3D 성공 여부 판별 마커 파일 시스템 |

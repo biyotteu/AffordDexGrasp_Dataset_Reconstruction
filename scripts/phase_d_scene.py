@@ -6,14 +6,15 @@ Phase D: Scene 구성(BlenderProc) + Physics + Collision Filtering
 - D3: Invalid grasp 필터링 (충돌 검사)
 
 Requirements:
-  pip install blenderproc
-  # BlenderProc will download Blender automatically on first run
+  pip install blenderproc==2.7.0
+  # blenderproc 2.7.0 → Blender 3.5.1 → Python 3.10 (conda와 일치)
+  # 첫 실행 시 Blender 자동 다운로드
 """
 
 import json
 import os
 import argparse
-import uuid
+import subprocess
 from pathlib import Path
 from collections import defaultdict
 
@@ -67,7 +68,7 @@ def generate_scene_jobs(cfg):
             continue
 
         mesh_info = mesh_index[obj_id]
-        scene_id = f"scene_{obj_id}_{uuid.uuid4().hex[:8]}"
+        scene_id = f"scene_{obj_id}"
 
         job = {
             "scene_id": scene_id,
@@ -93,95 +94,47 @@ def generate_scene_jobs(cfg):
 
 
 # ============================================================
+# blenderproc 버전 확인 + 자동 다운그레이드
+# ============================================================
+BPROC_TARGET_VERSION = "2.7.0"  # → Blender 3.5.1 → Python 3.10 (conda와 일치)
+
+
+def _ensure_blenderproc():
+    """blenderproc 2.7.0이 설치되어 있는지 확인하고, 아니면 자동 설치/다운그레이드"""
+    try:
+        result = subprocess.run(
+            ["python", "-c",
+             "import blenderproc; print(blenderproc.__version__)"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            installed_ver = result.stdout.strip()
+            if installed_ver == BPROC_TARGET_VERSION:
+                print(f"  blenderproc {installed_ver} OK")
+                return True
+            else:
+                print(f"  blenderproc {installed_ver} → {BPROC_TARGET_VERSION} 다운그레이드 중...")
+        else:
+            print(f"  blenderproc 미설치, {BPROC_TARGET_VERSION} 설치 중...")
+    except FileNotFoundError:
+        print(f"  blenderproc 미설치, {BPROC_TARGET_VERSION} 설치 중...")
+
+    r = subprocess.run(
+        ["pip", "install", f"blenderproc=={BPROC_TARGET_VERSION}"],
+        capture_output=True, text=True, timeout=300,
+    )
+    if r.returncode != 0:
+        print(f"  ❌ blenderproc 설치 실패: {r.stderr[-500:]}")
+        return False
+
+    print(f"  blenderproc {BPROC_TARGET_VERSION} 설치 완료")
+    return True
+
+
+# ============================================================
 # D2: BlenderProc 물리 기반 배치
 # ============================================================
 WORKER_SCRIPT = Path("scripts") / "phase_d_blenderproc_worker.py"
-
-# Blender 실행 경로 자동 탐색
-DEFAULT_BLENDER_PATHS = [
-    Path.home() / "blender" / "blender-4.2.1-linux-x64" / "blender",
-    Path.home() / "blender" / "blender-3.6.0-linux-x64" / "blender",
-    Path("/usr/local/bin/blender"),
-    Path("/usr/bin/blender"),
-    Path("/snap/bin/blender"),
-]
-
-
-def _find_blender(cfg):
-    """Blender 실행 파일 경로 탐색"""
-    # config에 지정된 경로 우선
-    blender_path = cfg.get('scene', {}).get('blender_path')
-    if blender_path and Path(blender_path).exists():
-        return str(blender_path)
-
-    # 기본 경로 탐색
-    for p in DEFAULT_BLENDER_PATHS:
-        if p.exists():
-            return str(p)
-
-    # which로 탐색
-    import subprocess
-    try:
-        result = subprocess.run(["which", "blender"], capture_output=True, text=True)
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except FileNotFoundError:
-        pass
-
-    return None
-
-
-def _get_blender_python(blender_path):
-    """Blender 내장 Python 경로 반환"""
-    blender_dir = Path(blender_path).parent
-    # Blender 4.x: <blender_dir>/<version>/python/bin/python3.xx
-    for version_dir in sorted(blender_dir.glob("[0-9]*.[0-9]*"), reverse=True):
-        python_dir = version_dir / "python" / "bin"
-        for pybin in sorted(python_dir.glob("python3*"), reverse=True):
-            if pybin.is_file() and not pybin.name.endswith("-config"):
-                return str(pybin)
-    return None
-
-
-def _ensure_blenderproc_in_blender(blender_python):
-    """Blender 내장 Python에 blenderproc이 설치되어 있는지 확인하고, 없으면 설치"""
-    import subprocess
-
-    # blenderproc 설치 확인
-    result = subprocess.run(
-        [blender_python, "-c", "import blenderproc; print(blenderproc.__version__)"],
-        capture_output=True, text=True, timeout=30
-    )
-    if result.returncode == 0:
-        version = result.stdout.strip()
-        print(f"  ✅ Blender Python에 blenderproc {version} 설치됨")
-        return True
-
-    # 설치 시도
-    print("  📦 Blender Python에 blenderproc 설치 중...")
-    result = subprocess.run(
-        [blender_python, "-m", "pip", "install", "blenderproc"],
-        capture_output=True, text=True, timeout=300
-    )
-    if result.returncode == 0:
-        print("  ✅ blenderproc 설치 완료")
-        return True
-    else:
-        # pip가 없으면 ensurepip 먼저
-        subprocess.run(
-            [blender_python, "-m", "ensurepip", "--upgrade"],
-            capture_output=True, text=True, timeout=60
-        )
-        result = subprocess.run(
-            [blender_python, "-m", "pip", "install", "blenderproc"],
-            capture_output=True, text=True, timeout=300
-        )
-        if result.returncode == 0:
-            print("  ✅ blenderproc 설치 완료 (ensurepip 후)")
-            return True
-
-    print(f"  ❌ blenderproc 설치 실패: {result.stderr[-300:]}")
-    return False
 
 
 def run_physics_settle(cfg, max_scenes=None):
@@ -189,8 +142,6 @@ def run_physics_settle(cfg, max_scenes=None):
     print("\n" + "=" * 60)
     print("[D2] Physics 기반 배치 실행")
     print("=" * 60)
-
-    import subprocess
 
     scenes_dir = Path(cfg['paths']['scenes'])
     jobs_path = scenes_dir / "jobs.jsonl"
@@ -204,33 +155,10 @@ def run_physics_settle(cfg, max_scenes=None):
         print(f"  ⚠️ Worker 스크립트 없음: {worker_path}")
         return
 
-    # --- Blender 직접 실행 방식 (conda numpy 충돌 방지) ---
-    blender_path = _find_blender(cfg)
-    if not blender_path:
-        print("  ❌ Blender를 찾을 수 없습니다.")
-        print("     config에 scene.blender_path를 지정하거나, ~/blender/ 에 설치하세요.")
+    # blenderproc 2.7.0 확인/설치
+    if not _ensure_blenderproc():
+        print("  ❌ blenderproc 준비 실패")
         return
-    print(f"  Blender: {blender_path}")
-
-    blender_python = _get_blender_python(blender_path)
-    if blender_python:
-        print(f"  Blender Python: {blender_python}")
-        if not _ensure_blenderproc_in_blender(blender_python):
-            print("  ❌ Blender에 blenderproc 설치 실패 - 중단")
-            return
-    else:
-        print("  ⚠️ Blender 내장 Python을 찾을 수 없음 - blenderproc run 방식으로 fallback")
-
-    # 환경 변수 정리: conda 경로 완전 제거 (Blender 자체 Python만 사용)
-    clean_env = os.environ.copy()
-    for key in ['PYTHONPATH', 'PYTHONHOME', 'CONDA_PREFIX',
-                'CONDA_DEFAULT_ENV', 'CONDA_PYTHON_EXE']:
-        clean_env.pop(key, None)
-    # LD_LIBRARY_PATH에서 conda 관련 경로 제거
-    if 'LD_LIBRARY_PATH' in clean_env:
-        ld_paths = clean_env['LD_LIBRARY_PATH'].split(':')
-        ld_paths = [p for p in ld_paths if 'anaconda' not in p and 'conda' not in p]
-        clean_env['LD_LIBRARY_PATH'] = ':'.join(ld_paths) if ld_paths else ''
 
     jobs = []
     with jsonlines.open(jobs_path) as reader:
@@ -271,24 +199,39 @@ def run_physics_settle(cfg, max_scenes=None):
                 break
             continue
 
-        # Blender 직접 실행 (--python-use-system-env 없이 → conda 오염 방지)
+        # blenderproc run 방식 (Blender 3.5.1 자동 다운로드/사용)
         worker_abs = str(worker_path.resolve())
         cmd = [
-            blender_path, "--background", "--python", worker_abs,
-            "--",  # Blender args와 script args 구분
-            "--job", str(job_file),
-            "--output_dir", str(scene_dir),
+            "blenderproc", "run",
+            worker_abs,
+            "--job", str(job_file.resolve()),
+            "--output_dir", str(scene_dir.resolve()),
         ]
 
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=300,
-                env=clean_env,
             )
-            if result.returncode != 0:
-                stderr_lines = result.stderr.strip().split('\n')
-                error_tail = '\n'.join(stderr_lines[-5:]) if len(stderr_lines) > 5 else result.stderr
-                print(f"    ⚠️ {job['scene_id']} 실패:\n{error_tail}")
+
+            # object_pose.json 존재 여부로 실제 성공 판단
+            pose_actually_saved = (scene_dir / "object_pose.json").exists()
+
+            if result.returncode != 0 or not pose_actually_saved:
+                stderr_lines = result.stderr.strip().split('\n') if result.stderr else []
+                tb_start = -1
+                for li, line in enumerate(stderr_lines):
+                    if 'Traceback' in line or 'Error' in line:
+                        tb_start = li
+                if tb_start >= 0:
+                    err_msg = '\n'.join(stderr_lines[tb_start:])
+                else:
+                    err_msg = '\n'.join(stderr_lines[-5:])
+
+                reason = "returncode=" + str(result.returncode)
+                if not pose_actually_saved:
+                    reason += ", object_pose.json 없음"
+                tqdm.write(f"    ⚠️ {job['scene_id']} 실패 ({reason}):")
+                tqdm.write(f"       {err_msg[:500]}")
 
                 log_file = scene_dir / "error.log"
                 with open(log_file, 'w') as f:
@@ -300,12 +243,13 @@ def run_physics_settle(cfg, max_scenes=None):
                 consecutive_fails = 0
 
         except subprocess.TimeoutExpired:
-            print(f"    ⚠️ {job['scene_id']} 타임아웃 (300초)")
+            tqdm.write(f"    ⚠️ {job['scene_id']} 타임아웃 (300초)")
             fail_count += 1
             consecutive_fails += 1
-        except FileNotFoundError:
-            print(f"    ❌ Blender 실행 파일 없음: {blender_path}")
-            break
+        except Exception as e:
+            tqdm.write(f"    ⚠️ {job['scene_id']} 에러: {e}")
+            fail_count += 1
+            consecutive_fails += 1
 
         if consecutive_fails >= MAX_CONSECUTIVE_FAILS:
             print(f"\n  ❌ 연속 {MAX_CONSECUTIVE_FAILS}회 실패 - 중단")
@@ -387,16 +331,20 @@ def filter_invalid_grasps(cfg):
             meta = all_meta[sample_id]
             t = np.array(meta['translation'])
 
-            # 간단한 충돌 검사: 손 위치(translation)가 테이블 내부인지
-            # 더 정확한 검사는 FK로 hand mesh를 생성한 후 수행
-            hand_pos = t + obj_pose[:3, 3]  # scene 좌표로 변환
+            # Grasp translation은 object local frame 기준 palm 위치.
+            # Scene 좌표로 변환: hand_pos = t + object_location
+            hand_pos = t + obj_pose[:3, 3]
 
-            # 테이블 충돌: 손 위치가 테이블 높이 아래이면 invalid
+            # 충돌 검사: palm이 테이블 표면보다 충분히 아래에 관통했는지 확인
+            # palm translation ≈ 물체 중심 근처이므로, 약간 아래(물체 하단 잡기)는 정상.
+            # 테이블 표면을 크게 관통한 경우(5cm 이상)만 invalid로 판정.
+            # 정밀 검사는 filter_grasps_detailed()에서 FK 기반으로 수행.
             table_top_z = table_cfg['height']
             collision = False
 
-            if hand_pos[2] < table_top_z - 0.02:  # 2cm margin
-                # 손이 테이블 평면 내에 있는지
+            penetration = table_top_z - hand_pos[2]  # 양수 = 테이블 아래
+            if penetration > 0.05:  # 5cm 이상 관통 시에만 충돌
+                # 손이 테이블 XY 범위 내에 있는지
                 if (abs(hand_pos[0] - table_center[0]) < table_half[0] and
                     abs(hand_pos[1] - table_center[1]) < table_half[1]):
                     collision = True

@@ -46,6 +46,7 @@ shadow_hand:
 
 # --- Scene Construction ---
 scene:
+  blender_path: /home/biyotteu/blender/blender-4.2.1-linux-x64/blender
   num_cameras: 5
   camera_layout:
     lateral_count: 4
