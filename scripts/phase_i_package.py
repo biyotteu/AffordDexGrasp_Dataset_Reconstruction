@@ -274,7 +274,8 @@ def generate_qc_report(cfg):
         cate_counter[str(sample.get('cate_id', 'unknown'))] += 1
         sem = sample.get('semantic', {})
         intention_counter[sem.get('intention', 'unknown')] += 1
-        contact_counter[sem.get('contact_parts', 'unknown')] += 1
+        cp = sem.get('contact_parts', 'unknown')
+        contact_counter[','.join(cp) if isinstance(cp, list) else str(cp)] += 1
         direction_counter[sem.get('grasp_direction', 'unknown')] += 1
         guidance_lengths.append(len(sample.get('guidance', '')))
 
