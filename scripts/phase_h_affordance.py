@@ -520,8 +520,8 @@ def distance_to_score(distances, sigma, method="gaussian"):
 # ============================================================
 # 전체 GT Affordance 생성 파이프라인
 # ============================================================
-def generate_affordance_gt(cfg, max_groups=None):
-    """전체 GT Affordance 생성"""
+def generate_affordance_gt(cfg, max_groups=None, group_id=None):
+    """GT Affordance 생성 (group_id 지정 시 해당 그룹만 처리)"""
     print("=" * 60)
     print("[H] GT Affordance 생성")
     print("=" * 60)
@@ -563,7 +563,12 @@ def generate_affordance_gt(cfg, max_groups=None):
     num_obj_points = cfg['affordance']['num_object_points']
 
     groups_list = list(semantic_groups.items())
-    if max_groups:
+    if group_id:
+        groups_list = [(gid, g) for gid, g in groups_list if gid == group_id]
+        if not groups_list:
+            print(f"  ERROR: group_id '{group_id}' not found")
+            return
+    elif max_groups:
         groups_list = groups_list[:max_groups]
 
     total_groups = 0
@@ -748,7 +753,7 @@ def main():
     cfg = load_config(args.config)
 
     if args.step in ["all", "generate"]:
-        generate_affordance_gt(cfg, max_groups=args.max_groups)
+        generate_affordance_gt(cfg, max_groups=args.max_groups, group_id=args.group_id)
 
     if args.step in ["all", "visualize"]:
         visualize_affordance_sample(cfg, group_id=args.group_id)

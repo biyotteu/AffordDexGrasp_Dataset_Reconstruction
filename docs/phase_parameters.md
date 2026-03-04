@@ -268,12 +268,15 @@ python scripts/phase_h_affordance.py [OPTIONS]
 | `--config` | str | `configs/pipeline_config.yaml` | 설정 파일 경로 |
 | `--step` | choice | `all` | `generate` / `visualize` / `all` |
 | `--max_groups` | int | `None` | **샘플 제한** — 처리할 최대 그룹 수 |
-| `--group_id` | str | `None` | 특정 그룹만 시각화 (visualize 단계) |
+| `--group_id` | str | `None` | 특정 그룹만 처리 (`generate`, `visualize` 모두 사용 가능) |
 
 **사용 예시:**
 ```bash
 # 5개 그룹만 affordance 생성
 python scripts/phase_h_affordance.py --step generate --max_groups 5
+
+# 특정 그룹만 affordance 생성
+python scripts/phase_h_affordance.py --step generate --group_id grp_001
 
 # 특정 그룹 시각화
 python scripts/phase_h_affordance.py --step visualize --group_id grp_001
